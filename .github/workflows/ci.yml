@@ -1,0 +1,170 @@
+name: ci
+
+# Build and test json2toon on every pull request and on pushes to main, across
+# the toolchains/targets the project commits to supporting (see README's
+# "Portability" section): clang and gcc on Linux and macOS (x86-64 and ARM64),
+# mingw64 cross-compiled to Windows, musl/static on Alpine, and emscripten to
+# WebAssembly. Modeled on liquidaty/zsv's CI, minus the release/packaging jobs.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+  workflow_dispatch:
+
+# Only the latest run for a given branch/PR needs to finish; cancel the rest.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # --------------------------------------------------------------- Linux
+  linux:
+    name: linux (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: CC=${{ matrix.cc }} ./configure
+      - name: Build (library + CLI)
+        run: make build
+      - name: Test
+        run: make test
+
+  # AddressSanitizer + UndefinedBehaviorSanitizer (LeakSanitizer included).
+  sanitizers:
+    name: linux (asan+ubsan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: ./configure
+      - name: Test under sanitizers
+        run: make ASAN=1 test
+
+  # Scalar build: exercises the portable fallback with SIMD compiled out.
+  scalar:
+    name: linux (scalar, --disable-simd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (scalar only)
+        run: ./configure --disable-simd
+      - name: Build (library + CLI)
+        run: make build
+      - name: Test
+        run: make test
+
+  # --------------------------------------------------------------- macOS
+  macos:
+    name: macos (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, arch: arm64 }
+          - { os: macos-13, arch: x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: ./configure
+      - name: Build (library + CLI)
+        run: make build
+      - name: Test
+        run: make test
+
+  # ----------------------------------------------- Windows (mingw cross)
+  # Cross-compile from Linux with mingw-w64. The produced binaries are PE/COFF
+  # and cannot run on the Linux host, so this job builds and verifies the
+  # artifacts rather than running the suite (matching zsv's mingw job).
+  windows-mingw:
+    name: windows (mingw64 cross-compile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+      - name: Configure (cross to Windows)
+        env:
+          CC: x86_64-w64-mingw32-gcc
+          AR: x86_64-w64-mingw32-ar
+          RANLIB: x86_64-w64-mingw32-ranlib
+          CONFIGURE_HOST: x86_64-w64-mingw32
+        run: ./configure
+      - name: Build (library + CLI)
+        run: make build
+      - name: Verify Windows artifacts
+        run: |
+          file json2toon.exe libjson2toon.dll
+          file json2toon.exe   | grep -q 'PE32+ executable'
+          file libjson2toon.dll | grep -q 'PE32+ executable (DLL)'
+
+  # --------------------------------------------------------------- musl
+  # Static build under musl libc on Alpine.
+  musl:
+    name: linux (musl, static)
+    runs-on: ubuntu-latest
+    container: alpine:3.20
+    timeout-minutes: 10
+    steps:
+      - name: Install toolchain
+        run: apk add --no-cache build-base make bash git
+      - uses: actions/checkout@v4
+      - name: Configure (static)
+        env:
+          STATIC_BUILD: '1'
+        run: ./configure
+      - name: Build (library + CLI)
+        run: make build
+      - name: Test
+        run: make test
+
+  # ----------------------------------------------------- WebAssembly
+  # Cross-compile to WASM with emscripten and run the test suite under Node.
+  # The Makefile's `test` target execs the test binary directly, which a WASM
+  # artifact can't do, so build the binary and invoke it via node.
+  wasm:
+    name: wasm (emscripten)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up emsdk
+        uses: mymindstorm/setup-emsdk@v14
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+      - name: Configure (emscripten, static)
+        env:
+          STATIC_BUILD: '1'
+          CROSS_COMPILING: 'yes'
+        run: emconfigure ./configure --disable-shared
+      - name: Build test binary
+        run: emmake make obj/test
+      - name: Run test suite under Node
+        run: node obj/test
