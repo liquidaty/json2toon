@@ -132,11 +132,45 @@ Common options:
 | `-o, --output FILE` | Write to `FILE` instead of standard output.             |
 | `--indent N`        | Indent width in spaces (default 2).                     |
 | `-h, --help`        | Print usage and exit.                                   |
+| `--help-json`       | Print the help/usage as JSON and exit.                  |
+| `--help-toon`       | Print the help/usage as TOON and exit.                  |
 | `-V, --version`     | Print version and exit.                                 |
 
 Exit status is `0` on success and non-zero on malformed input or I/O error; a
 diagnostic identifying the byte offset of the problem is written to standard
 error.
+
+### Machine-readable help
+
+`-h, --help` prints the usual human-oriented usage text. `--help-json` and
+`--help-toon` print the *same* information as structured data, so a program — or
+an LLM-driven agent — can discover the tool's interface without scraping prose:
+
+```sh
+json2toon --help-json     # usage as a JSON document
+json2toon --help-toon     # the same document as TOON (fewer tokens)
+```
+
+The document describes the program name, version, summary, usage line, and an
+array of options, each with its short and long forms, argument metavariable,
+default, and description:
+
+```json
+{
+  "program": "json2toon",
+  "version": "1.0.0",
+  "summary": "Convert JSON (stdin) to TOON (stdout).",
+  "usage": "json2toon [OPTIONS]",
+  "options": [
+    {"short": "-i", "long": "--input", "arg": "FILE", "default": null, "description": "read JSON from FILE instead of stdin"}
+  ]
+}
+```
+
+`--help-toon` renders that document by piping it through json2toon's own
+converter, so its output is, by construction, exactly the TOON json2toon would
+produce for the JSON help — `json2toon --help-json | json2toon` and
+`json2toon --help-toon` are identical. Both exit `0`.
 
 ## Library usage
 
