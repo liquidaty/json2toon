@@ -18,6 +18,12 @@ on:
       - '**.md'
       - 'LICENSE'
   workflow_dispatch:
+    inputs:
+      macos_intel:
+        description: 'Also run the Intel (x86_64) macOS job'
+        required: false
+        type: boolean
+        default: false
 
 # Only the latest run for a given branch/PR needs to finish; cancel the rest.
 concurrency:
@@ -77,16 +83,29 @@ jobs:
         run: make test
 
   # --------------------------------------------------------------- macOS
+  # Apple-silicon (arm64) runs on every push/PR; it's plentiful and fast.
   macos:
-    name: macos (${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
+    name: macos (arm64)
+    runs-on: macos-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-latest, arch: arm64 }
-          - { os: macos-13, arch: x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: ./configure
+      - name: Build (library + CLI)
+        run: make build
+      - name: Test
+        run: make test
+
+  # Intel (x86_64) macOS is opt-in only: the macos-13 runner pool is scarce and
+  # being deprecated, so it can queue for minutes. The x86 SIMD paths are also
+  # covered by the Linux gcc/clang jobs. Run it on demand via "Run workflow"
+  # with the "macos_intel" box checked.
+  macos-intel:
+    name: macos (x86_64, manual)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.macos_intel }}
+    runs-on: macos-13
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Configure
