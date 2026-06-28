@@ -133,7 +133,10 @@ jobs:
     container: alpine:3.20
     timeout-minutes: 10
     steps:
+      # Alpine ships busybox 'sh' but not bash; the workflow-level default shell
+      # is bash, so this first step must explicitly use sh to install it.
       - name: Install toolchain
+        shell: sh
         run: apk add --no-cache build-base make bash git
       - uses: actions/checkout@v4
       - name: Configure (static)
