@@ -140,9 +140,12 @@ jobs:
         run: make build
       - name: Verify Windows artifacts
         run: |
-          file json2toon.exe libjson2toon.dll
-          file json2toon.exe   | grep -q 'PE32+ executable'
-          file libjson2toon.dll | grep -q 'PE32+ executable (DLL)'
+          builddir=$(make print-builddir)
+          app="$builddir/json2toon.exe"
+          dll="$builddir/libjson2toon.dll"
+          file "$app" "$dll"
+          file "$app" | grep -q 'PE32+ executable'
+          file "$dll" | grep -q 'PE32+ executable (DLL)'
 
   # --------------------------------------------------------------- musl
   # Static build under musl libc on Alpine.
@@ -186,7 +189,12 @@ jobs:
           STATIC_BUILD: '1'
           CROSS_COMPILING: 'yes'
         run: emconfigure ./configure --disable-shared
-      - name: Build test binary
-        run: emmake make obj/test
-      - name: Run test suite under Node
-        run: node obj/test
+      - name: Build and run test binary under Node
+        run: |
+          # The test target lands in the per-target build dir, not obj/. Resolve
+          # that dir under the same emmake environment used to build it (so the
+          # emcc-derived build id matches), build it, then run the emitted JS
+          # launcher with Node.
+          testbin="$(emmake make print-builddir | tail -1)/test"
+          emmake make "$testbin"
+          node "$testbin"

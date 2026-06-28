@@ -28,6 +28,11 @@ AR      ?= ar
 RANLIB  ?= ranlib
 PREFIX  ?= /usr/local
 
+# Executable suffix for the linker output. ./configure writes this into the
+# config file (".exe" for Windows/mingw targets, empty elsewhere); default to
+# empty so a standalone `make` without ./configure still works.
+EXE_EXT ?=
+
 # --------------------------------------------- target / compiler / variant id
 # Derived from the compiler's own configuration so it is correct when cross-
 # compiling: -dumpmachine prints the *target* triple (native, mingw64,
@@ -108,8 +113,8 @@ LIB_OBJS := $(LIB_SRCS:src/%.c=$(OBJDIR)/%.o)
 
 STATIC_LIB := $(BUILDDIR)/libjson2toon.a
 SHARED_LIB := $(BUILDDIR)/libjson2toon.$(SHLIB_EXT)
-APP := $(BUILDDIR)/json2toon
-TESTBIN := $(BUILDDIR)/test
+APP := $(BUILDDIR)/json2toon$(EXE_EXT)
+TESTBIN := $(BUILDDIR)/test$(EXE_EXT)
 
 LIBS := $(STATIC_LIB)
 ifeq ($(ENABLE_SHARED),1)
