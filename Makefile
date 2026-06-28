@@ -30,6 +30,18 @@ ifeq ($(SHLIB_EXT),)
   endif
 endif
 
+# Executable suffix. ./configure sets this (".exe" for Windows targets, empty
+# otherwise); when building standalone without configure, detect a native
+# Windows shell (MSYS/MinGW/Cygwin) from uname so $(APP) matches the file the
+# linker actually produces.
+ifeq ($(origin EXE_EXT),undefined)
+  ifneq (,$(filter MINGW% MSYS% CYGWIN% Windows%,$(UNAME_S)))
+    EXE_EXT := .exe
+  else
+    EXE_EXT :=
+  endif
+endif
+
 ENABLE_SHARED ?= 1
 ifneq ($(STATIC_BUILD),)
   ifneq ($(STATIC_BUILD),0)
@@ -65,8 +77,8 @@ LIB_OBJS := $(LIB_SRCS:src/%.c=$(OBJDIR)/%.o)
 
 STATIC_LIB := libjson2toon.a
 SHARED_LIB := libjson2toon.$(SHLIB_EXT)
-APP := json2toon
-TESTBIN := $(OBJDIR)/test
+APP := json2toon$(EXE_EXT)
+TESTBIN := $(OBJDIR)/test$(EXE_EXT)
 
 LIBS := $(STATIC_LIB)
 ifeq ($(ENABLE_SHARED),1)
@@ -130,4 +142,4 @@ install: build
 
 clean:
 	rm -rf $(OBJDIR) $(STATIC_LIB) libjson2toon.so libjson2toon.dylib \
-	       libjson2toon.dll $(APP)
+	       libjson2toon.dll json2toon json2toon.exe

@@ -11,11 +11,18 @@
 
 set -e
 
-prefix=/usr/local
+# Typical values may be supplied either as a direct option (e.g. --prefix=DIR)
+# or via the environment (e.g. PREFIX=DIR). This lets the cross-build "*_env"
+# wrappers -- which export PREFIX, CC, AR, RANLIB, CONFIGURE_HOST, CONFIGFILE,
+# STATIC_BUILD, ... -- configure correctly when run as `./<arch>_env ./configure`
+# with no extra arguments. An explicit option always overrides the environment.
+prefix="${PREFIX:-/usr/local}"
 enable_simd=1
 enable_debug=0
 enable_shared=1
-host=""
+# Target triple. Precedence: --host=TRIPLE (below) > $HOST > the cross env's
+# $CONFIGURE_HOST > empty (empty means "target the build host", via uname).
+host="${HOST:-${CONFIGURE_HOST:-}}"
 
 for arg in "$@"; do
   case "$arg" in
@@ -29,12 +36,16 @@ for arg in "$@"; do
     -h|--help)
       cat <<EOF
 Usage: ./configure [OPTIONS]
-  --prefix=DIR        installation root (default /usr/local)
-  --host=TRIPLE       target triple when cross-compiling
+  --prefix=DIR        installation root [\$PREFIX or /usr/local]
+  --host=TRIPLE       target triple when cross-compiling [\$HOST or
+                      \$CONFIGURE_HOST]
   --disable-simd      build the scalar code path only
   --enable-debug      build with debug info and assertions
   --disable-shared    build the static library only
 Environment: CC, AR, RANLIB, CFLAGS, LDFLAGS, CONFIGFILE are honoured.
+  PREFIX provides the default for --prefix; HOST or CONFIGURE_HOST provides
+  the default for --host; STATIC_BUILD=1 forces a static-only build. These
+  let the cross-build "*_env" wrappers work via \`./<arch>_env ./configure\`.
 EOF
       exit 0 ;;
     *) echo "configure: ignoring unknown option: $arg" >&2 ;;
@@ -61,13 +72,18 @@ case "$target_os" in
   Linux)  target_os=linux ;;
 esac
 
+# Executable suffix: Windows/mingw toolchains append ".exe" to the linker
+# output, so the build and install rules must expect that name there (and only
+# there). Emitted to the config file as EXE_EXT.
+EXE_EXT=""
 case "$target_os" in
   darwin)
     SHLIB_EXT=dylib
     SHLIB_LDFLAGS="-dynamiclib -install_name $prefix/lib/libjson2toon.dylib" ;;
   windows)
     SHLIB_EXT=dll
-    SHLIB_LDFLAGS="-shared" ;;
+    SHLIB_LDFLAGS="-shared"
+    EXE_EXT=".exe" ;;
   *)
     SHLIB_EXT=so
     SHLIB_LDFLAGS="-shared -Wl,-soname,libjson2toon.so" ;;
@@ -99,6 +115,7 @@ EXTRA_CFLAGS = $EXTRA_CFLAGS
 EXTRA_LDFLAGS =
 SHLIB_EXT = $SHLIB_EXT
 SHLIB_LDFLAGS = $SHLIB_LDFLAGS
+EXE_EXT = $EXE_EXT
 ENABLE_SHARED = $enable_shared
 DEBUG_DEFAULT = $DEBUG_DEFAULT
 EOF
@@ -112,6 +129,8 @@ fi
 echo "configure: writing $CONFIGFILE"
 echo "  CC            = $CC"
 echo "  prefix        = $prefix"
+echo "  host triple   = ${host:-(build host)}"
 echo "  target os     = $target_os"
+echo "  exe suffix    = ${EXE_EXT:-(none)}"
 echo "  shared lib    = $enable_shared ($SHLIB_EXT)"
 echo "  SIMD          = $SIMD_DESC"
