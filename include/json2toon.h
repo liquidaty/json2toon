@@ -5,6 +5,9 @@
  * sink callback in bounded-size pieces. Neither the whole input nor the whole
  * output is ever required to be resident in memory.
  *
+ * The reverse direction (TOON -> JSON) is exposed through a mirror-image API
+ * (toon2json_*) at the bottom of this header.
+ *
  * Copyright (c) 2026. MIT License.
  */
 #ifndef JSON2TOON_H
@@ -27,7 +30,7 @@ enum {
   JSON2TOON_ERR_USAGE = -6   /* API used incorrectly (e.g. feed after error) */
 };
 
-/* Sink callback. Receives a chunk of UTF-8 TOON output. Return 0 to continue,
+/* Sink callback. Receives a chunk of UTF-8 output. Return 0 to continue,
  * non-zero to abort the conversion with JSON2TOON_ERR_IO. The bytes are only
  * valid for the duration of the call. */
 typedef int (*json2toon_sink)(const char *data, size_t len, void *ctx);
@@ -68,6 +71,54 @@ const char *json2toon_strerror(int rc);
 
 /* Library version string, e.g. "1.0.0". */
 const char *json2toon_version(void);
+
+/* ====================================================================== *
+ *  TOON -> JSON (the reverse direction)
+ *
+ *  Mirrors the json2toon API exactly: a converter object fed incrementally
+ *  via toon2json_feed() and flushed with toon2json_finish(), delivering JSON
+ *  output through the same json2toon_sink callback in bounded-size pieces.
+ *  TOON is indentation-structured, so the reverse converter is driven line by
+ *  line; peak memory is bounded by the nesting depth and the width of the
+ *  widest single line (e.g. a tabular row), never by total input or output.
+ *
+ *  Output is compact (no insignificant whitespace) UTF-8 JSON. Numbers are
+ *  passed through verbatim and the encoding round-trips losslessly back to the
+ *  TOON that json2toon would have produced.
+ * ====================================================================== */
+
+/* Configuration for the reverse converter. Pass NULL to accept all defaults;
+ * a zero field also selects that field's default. */
+typedef struct {
+  unsigned max_depth;       /* maximum nesting depth (default 256) */
+  size_t max_line_bytes;    /* cap on a single buffered input line
+                             * (default 0 == a large built-in limit) */
+} toon2json_options;
+
+typedef struct toon2json toon2json_t;
+
+/* Create a reverse converter. Returns NULL on allocation failure. */
+toon2json_t *toon2json_new(json2toon_sink sink, void *ctx,
+                           const toon2json_options *opts);
+
+/* Feed a chunk of TOON input. May be called repeatedly. Returns JSON2TOON_OK
+ * or a negative error code; once an error is returned the converter is poisoned
+ * and further feed/finish calls return the same error. */
+int toon2json_feed(toon2json_t *t2j, const char *data, size_t len);
+
+/* Signal end of input and flush any pending output. Returns JSON2TOON_OK on a
+ * complete, well-formed document, otherwise a negative error code. */
+int toon2json_finish(toon2json_t *t2j);
+
+/* Destroy a converter created by toon2json_new(). Safe to call with NULL. */
+void toon2json_delete(toon2json_t *t2j);
+
+/* Byte offset within the input stream at which the most recent error was
+ * detected. Meaningful only after a call returned a negative code. */
+size_t toon2json_error_offset(const toon2json_t *t2j);
+
+/* Human-readable description of a status code (TOON-oriented wording). */
+const char *toon2json_strerror(int rc);
 
 #ifdef __cplusplus
 }

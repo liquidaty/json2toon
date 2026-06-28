@@ -1,7 +1,7 @@
 # json2toon
 
 A fast, portable C library and command-line tool that converts **JSON** into
-**TOON** (Token-Oriented Object Notation).
+**TOON** (Token-Oriented Object Notation) and losslessly back again.
 
 `json2toon` is built for the same job a Unix filter is built for: read from a
 stream, write to a stream, and never let memory grow with the size of the data.
@@ -31,6 +31,8 @@ and cheaply from JSON you already have.
 - **Library *and* application.** Use the `json2toon` command as a Unix filter,
   or link `libjson2toon` and drive the converter from your own program through a
   small, stable C API.
+- **Both directions.** Convert JSON → TOON and, losslessly, TOON → JSON, through
+  the same incremental, bounded-memory API.
 - **Streaming / incremental.** Input is consumed in chunks and output is emitted
   as soon as it is ready. You can feed it a stream of any length — including data
   that never ends — without buffering the whole document.
@@ -70,6 +72,13 @@ under `/usr/local`. Override the prefix the usual way:
 ```sh
 ./configure --prefix="$HOME/.local"
 ```
+
+Build artifacts never land in the source tree: `make build` writes them under a
+directory keyed by the target triple, compiler, and variant
+(`build/<target>/<cc>-<version>/<release|debug|asan>/`), so native, cross,
+debug, and sanitizer builds coexist without clobbering each other. `make
+install` is the only step that copies files outside the build tree. Run `make
+help` for the full list of targets.
 
 Useful `configure` options:
 
@@ -122,6 +131,12 @@ curl -s https://example.com/api/records.json | json2toon | less
 
 # Explicit input/output files
 json2toon -i data.json -o data.toon
+
+# Convert the other way: TOON in, JSON out
+json2toon -r < data.toon > data.json
+
+# Round-trips losslessly
+json2toon < data.json | json2toon -r
 ```
 
 Common options:
@@ -130,47 +145,17 @@ Common options:
 | ------------------- | ------------------------------------------------------- |
 | `-i, --input FILE`  | Read from `FILE` instead of standard input.             |
 | `-o, --output FILE` | Write to `FILE` instead of standard output.             |
-| `--indent N`        | Indent width in spaces (default 2).                     |
+| `-r, --reverse`     | Convert TOON to JSON (default is JSON to TOON).          |
+| `--indent N`        | Indent width in spaces for TOON output (default 2).     |
 | `-h, --help`        | Print usage and exit.                                   |
-| `--help-json`       | Print the help/usage as JSON and exit.                  |
-| `--help-toon`       | Print the help/usage as TOON and exit.                  |
 | `-V, --version`     | Print version and exit.                                 |
+
+In reverse mode the emitted JSON is compact (no insignificant whitespace);
+numbers are passed through verbatim so a JSON → TOON → JSON round trip is exact.
 
 Exit status is `0` on success and non-zero on malformed input or I/O error; a
 diagnostic identifying the byte offset of the problem is written to standard
 error.
-
-### Machine-readable help
-
-`-h, --help` prints the usual human-oriented usage text. `--help-json` and
-`--help-toon` print the *same* information as structured data, so a program — or
-an LLM-driven agent — can discover the tool's interface without scraping prose:
-
-```sh
-json2toon --help-json     # usage as a JSON document
-json2toon --help-toon     # the same document as TOON (fewer tokens)
-```
-
-The document describes the program name, version, summary, usage line, and an
-array of options, each with its short and long forms, argument metavariable,
-default, and description:
-
-```json
-{
-  "program": "json2toon",
-  "version": "1.0.0",
-  "summary": "Convert JSON (stdin) to TOON (stdout).",
-  "usage": "json2toon [OPTIONS]",
-  "options": [
-    {"short": "-i", "long": "--input", "arg": "FILE", "default": null, "description": "read JSON from FILE instead of stdin"}
-  ]
-}
-```
-
-`--help-toon` renders that document by piping it through json2toon's own
-converter, so its output is, by construction, exactly the TOON json2toon would
-produce for the JSON help — `json2toon --help-json | json2toon` and
-`json2toon --help-toon` are identical. Both exit `0`.
 
 ## Library usage
 
@@ -219,9 +204,39 @@ int main(void) {
 
 The shape of the API — a converter object you `feed()` incrementally and then
 `finish()`, with output delivered through a callback — is what keeps memory
-bounded, and it is also the surface through which the planned reverse direction
-(TOON → JSON) will be exposed, so code written against it today will not need to
-change.
+bounded. The reverse direction (TOON → JSON) is exposed through the identical
+surface: swap `json2toon_*` for `toon2json_*` (and `json2toon_options` for
+`toon2json_options`) and the same sink callback receives JSON instead of TOON.
+
+```c
+#include <json2toon.h>
+#include <stdio.h>
+
+static int write_sink(const char *data, size_t len, void *ctx) {
+    return fwrite(data, 1, len, (FILE *)ctx) == len ? 0 : -1;
+}
+
+int main(void) {
+    toon2json_t *t2j = toon2json_new(write_sink, stdout, NULL);
+    char buf[65536];
+    size_t n;
+    int rc = JSON2TOON_OK;
+    while ((n = fread(buf, 1, sizeof buf, stdin)) > 0)
+        if ((rc = toon2json_feed(t2j, buf, n)) != JSON2TOON_OK)
+            break;
+    if (rc == JSON2TOON_OK)
+        rc = toon2json_finish(t2j);
+    if (rc != JSON2TOON_OK)
+        fprintf(stderr, "toon2json: %s\n", toon2json_strerror(rc));
+    toon2json_delete(t2j);
+    return rc == JSON2TOON_OK ? 0 : 1;
+}
+```
+
+The reverse converter is line-oriented rather than byte-oriented internally —
+TOON expresses structure through indentation — but it preserves the same
+guarantee: peak memory is bounded by nesting depth and the width of the widest
+single line (for example one tabular row), never by total input or output size.
 
 ## Design notes
 
@@ -267,12 +282,14 @@ make check-valgrind        # run the suite under Valgrind (leak check)
 The suite includes conformance cases comparing `json2toon` output against
 reference TOON, fuzz/streaming tests that feed input one byte at a time to prove
 the incremental path matches the bulk path, and memory-bound tests that confirm
-peak allocation does not scale with input size. Releases are gated on a clean
-sanitizer and leak report.
+peak allocation does not scale with input size. It also covers the reverse
+(TOON → JSON) path and full JSON → TOON → JSON round trips. Releases are gated on
+a clean sanitizer and leak report.
 
 ## Roadmap
 
 - **TOON → JSON** lossless round-trip, exposed through the same incremental API.
+  *(Done — see `toon2json_*` and `json2toon -r`.)*
 - Additional SIMD back-ends as targets warrant.
 
 ## License

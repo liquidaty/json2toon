@@ -1,15 +1,24 @@
 # json2toon - build the libjson2toon library, the json2toon CLI, and tests.
 #
-# Targets used by the build protocol:
-#   make build         build the library and application
+# Quick start (run `make help` for the full list):
+#   make build         build the library + CLI into a per-target build dir
 #   make test          build and run the test suite
-#   make test-leaks    run the test suite under a leak checker
-#   make clean         remove build artifacts
+#   make install       copy the built artifacts under $(PREFIX)
+#   make clean         remove all build output
+#
+# Artifacts never land in the source tree. They go under a directory keyed by
+# the target triple, the compiler, and the build variant:
+#
+#   $(BUILDROOT)/<target-triple>/<cc>-<version>/<variant>/
+#
+# so release/debug/asan builds and different toolchains (native, mingw64,
+# emscripten, cross gcc) coexist without ever clobbering one another.
+# `make install` is the only step that writes outside the build tree.
 #
 # Flags: ASAN=1 (AddressSanitizer + UBSan), DEBUG=1 (debug build).
 # Environment CC/AR/RANLIB/CFLAGS/LDFLAGS and CONFIGFILE are honoured. The
 # config file written by ./configure is included when present; otherwise
-# sensible defaults let "make build" work standalone.
+# sensible defaults let the targets work standalone.
 
 CONFIGFILE ?= config.mk
 -include $(CONFIGFILE)
@@ -19,6 +28,39 @@ AR      ?= ar
 RANLIB  ?= ranlib
 PREFIX  ?= /usr/local
 
+# --------------------------------------------- target / compiler / variant id
+# Derived from the compiler's own configuration so it is correct when cross-
+# compiling: -dumpmachine prints the *target* triple (native, mingw64,
+# emscripten and cross toolchains alike) and -dumpversion the compiler version.
+# Neither runs a target binary, matching configure's no-run-probe policy.
+TARGET_TRIPLE := $(shell $(CC) -dumpmachine 2>/dev/null)
+ifeq ($(TARGET_TRIPLE),)
+  TARGET_TRIPLE := unknown-target
+endif
+CC_NAME := $(notdir $(CC))
+CC_VERSION := $(shell $(CC) -dumpversion 2>/dev/null)
+ifeq ($(CC_VERSION),)
+  CC_VERSION := 0
+endif
+
+ifeq ($(ASAN),1)
+  VARIANT := asan
+else ifeq ($(DEBUG),1)
+  VARIANT := debug
+else ifeq ($(DEBUG_DEFAULT),1)
+  VARIANT := debug
+else
+  VARIANT := release
+endif
+
+# The parent dir is target-platform-specific; override BUILDROOT to relocate
+# the whole tree (e.g. to a temp filesystem): make build BUILDROOT=/tmp/j2t
+BUILDROOT ?= build
+BUILDID   := $(TARGET_TRIPLE)/$(CC_NAME)-$(CC_VERSION)/$(VARIANT)
+BUILDDIR  := $(BUILDROOT)/$(BUILDID)
+OBJDIR    := $(BUILDDIR)/obj
+
+# ------------------------------------------------ shared-library conventions
 UNAME_S := $(shell uname -s 2>/dev/null)
 ifeq ($(SHLIB_EXT),)
   ifeq ($(UNAME_S),Darwin)
@@ -30,18 +72,6 @@ ifeq ($(SHLIB_EXT),)
   endif
 endif
 
-# Executable suffix. ./configure sets this (".exe" for Windows targets, empty
-# otherwise); when building standalone without configure, detect a native
-# Windows shell (MSYS/MinGW/Cygwin) from uname so $(APP) matches the file the
-# linker actually produces.
-ifeq ($(origin EXE_EXT),undefined)
-  ifneq (,$(filter MINGW% MSYS% CYGWIN% Windows%,$(UNAME_S)))
-    EXE_EXT := .exe
-  else
-    EXE_EXT :=
-  endif
-endif
-
 ENABLE_SHARED ?= 1
 ifneq ($(STATIC_BUILD),)
   ifneq ($(STATIC_BUILD),0)
@@ -49,6 +79,7 @@ ifneq ($(STATIC_BUILD),)
   endif
 endif
 
+# ------------------------------------------------------------------- flags
 WARN := -Wall -Wextra -Wno-unused-parameter
 BASE_CFLAGS := -std=c11 $(WARN) -Iinclude -Isrc -fPIC
 OPT_CFLAGS := -O2
@@ -71,22 +102,43 @@ endif
 ALL_CFLAGS := $(BASE_CFLAGS) $(OPT_CFLAGS) $(SAN_CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS)
 ALL_LDFLAGS := $(SAN_LDFLAGS) $(EXTRA_LDFLAGS) $(LDFLAGS)
 
-OBJDIR := obj
-LIB_SRCS := src/json2toon.c src/dom.c src/format.c src/simd.c
+# ----------------------------------------------------- sources / artifacts
+LIB_SRCS := src/json2toon.c src/toon2json.c src/dom.c src/format.c src/simd.c
 LIB_OBJS := $(LIB_SRCS:src/%.c=$(OBJDIR)/%.o)
 
-STATIC_LIB := libjson2toon.a
-SHARED_LIB := libjson2toon.$(SHLIB_EXT)
-APP := json2toon$(EXE_EXT)
-TESTBIN := $(OBJDIR)/test$(EXE_EXT)
+STATIC_LIB := $(BUILDDIR)/libjson2toon.a
+SHARED_LIB := $(BUILDDIR)/libjson2toon.$(SHLIB_EXT)
+APP := $(BUILDDIR)/json2toon
+TESTBIN := $(BUILDDIR)/test
 
 LIBS := $(STATIC_LIB)
 ifeq ($(ENABLE_SHARED),1)
   LIBS += $(SHARED_LIB)
 endif
 
-.PHONY: all build lib app test test-leaks clean install
-.DEFAULT_GOAL := build
+.PHONY: help all build lib app test check test-leaks clean distclean install \
+        print-builddir
+.DEFAULT_GOAL := help
+
+help:
+	@echo 'json2toon - available make targets:'
+	@echo ''
+	@echo '  help          show this list (default target)'
+	@echo '  build         build libjson2toon (static + shared) and the json2toon CLI'
+	@echo '  lib           build the libraries only'
+	@echo '  app           build the json2toon CLI only'
+	@echo '  test          build and run the unit/round-trip test suite'
+	@echo '  check         alias for test'
+	@echo '  test-leaks    run the test suite under a leak checker'
+	@echo '  install       copy built artifacts under PREFIX (default /usr/local)'
+	@echo '  clean         remove the entire build tree (all targets/variants)'
+	@echo '  distclean     clean + remove ./configure output and legacy artifacts'
+	@echo '  print-builddir  print the resolved build directory for this config'
+	@echo ''
+	@echo 'Flags:  ASAN=1 (AddressSanitizer+UBSan)   DEBUG=1 (debug build)'
+	@echo 'Vars:   CC, AR, RANLIB, CFLAGS, LDFLAGS, PREFIX, BUILDROOT'
+	@echo ''
+	@echo 'This config builds into: $(BUILDDIR)'
 
 all: build
 build: $(LIBS) $(APP)
@@ -118,7 +170,7 @@ $(APP): $(OBJDIR)/main.o $(STATIC_LIB)
 $(TESTBIN): $(OBJDIR)/test.o $(STATIC_LIB)
 	$(CC) $(ALL_LDFLAGS) -o $@ $(OBJDIR)/test.o $(STATIC_LIB)
 
-test: $(TESTBIN)
+test check: $(TESTBIN)
 	$(TESTBIN)
 
 # Leak check: use macOS 'leaks' when available, else fall back to running the
@@ -140,6 +192,16 @@ install: build
 	cp include/json2toon.h $(PREFIX)/include/
 	[ -f json2toon.pc ] && cp json2toon.pc $(PREFIX)/lib/pkgconfig/ || true
 
+print-builddir:
+	@echo $(BUILDDIR)
+
 clean:
-	rm -rf $(OBJDIR) $(STATIC_LIB) libjson2toon.so libjson2toon.dylib \
-	       libjson2toon.dll json2toon json2toon.exe
+	rm -rf $(BUILDROOT)
+
+# Also remove configure output and any legacy in-tree artifacts from older
+# (pre per-target build dir) layouts.
+distclean: clean
+	rm -f config.mk config.sbx json2toon.pc
+	rm -rf obj
+	rm -f libjson2toon.a libjson2toon.so libjson2toon.dylib libjson2toon.dll \
+	      json2toon
