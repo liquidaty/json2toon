@@ -291,6 +291,16 @@ static int emit_scalar(toon2json *t, const char *s, size_t n) {
     j2t_write(&t->out, s, n);
     return 0;
   }
+  /* A bare (unquoted) token reaching here must be a string the forward path
+   * would have emitted without quotes. In strict mode, any token that *would*
+   * have needed quoting (a stray ':', ',', bracket/brace, backslash, control
+   * byte, surrounding whitespace, or '-' prefix) is not valid TOON and is
+   * rejected rather than silently coerced into a string. Lenient mode keeps the
+   * old permissive behavior. */
+  if (!t->opt.lenient && j2t_str_needs_quote(s, n, ',')) {
+    set_err(t, JSON2TOON_ERR_PARSE, t->line_off);
+    return -1;
+  }
   emit_json_string(t, s, n);             /* bare unquoted string */
   return 0;
 }
@@ -969,6 +979,7 @@ toon2json *toon2json_new(json2toon_sink sink, void *ctx,
       t->opt.max_depth = opts->max_depth;
     if (opts->max_line_bytes)
       t->opt.max_line_bytes = opts->max_line_bytes;
+    t->opt.lenient = opts->lenient;
   }
 
   j2t_simd_init();

@@ -18,6 +18,8 @@ static void usage(FILE *f) {
     "  -i, --input FILE    read input from FILE instead of stdin\n"
     "  -o, --output FILE   write output to FILE instead of stdout\n"
     "  -r, --reverse       convert TOON to JSON (default is JSON to TOON)\n"
+    "      --lenient       (with -r) accept loosely-formatted TOON: treat any\n"
+    "                      unquoted value as a string instead of rejecting it\n"
     "      --indent N      spaces per indentation level for TOON (default 2)\n"
     "  -h, --help          show this help and exit\n"
     "  -V, --version       show version and exit\n",
@@ -60,13 +62,16 @@ static int run_forward(FILE *in, FILE *out, unsigned indent, char *buf,
 }
 
 /* Run the TOON -> JSON direction. Returns a json2toon status code. */
-static int run_reverse(FILE *in, FILE *out, char *buf, size_t bufsz,
+static int run_reverse(FILE *in, FILE *out, int lenient, char *buf, size_t bufsz,
                        size_t *err_off) {
+  toon2json_options opt;
   toon2json_t *t2j;
   size_t n;
   int rc = JSON2TOON_OK;
 
-  t2j = toon2json_new(write_sink, out, NULL);
+  memset(&opt, 0, sizeof opt);
+  opt.lenient = lenient;
+  t2j = toon2json_new(write_sink, out, &opt);
   if (!t2j)
     return JSON2TOON_ERR_MEMORY;
 
@@ -90,6 +95,7 @@ int main(int argc, char **argv) {
   const char *in_path = NULL, *out_path = NULL;
   unsigned indent = 0;
   int reverse = 0;
+  int lenient = 0;
   FILE *in = stdin, *out = stdout;
   char *buf;
   size_t err_off = 0;
@@ -105,6 +111,8 @@ int main(int argc, char **argv) {
       out_path = argv[i];
     } else if (!strcmp(a, "-r") || !strcmp(a, "--reverse")) {
       reverse = 1;
+    } else if (!strcmp(a, "--lenient")) {
+      lenient = 1;
     } else if (!strcmp(a, "--indent")) {
       if (++i >= argc) { fprintf(stderr, "%s: --indent needs an argument\n", prog); return 2; }
       indent = (unsigned)strtoul(argv[i], NULL, 10);
@@ -144,7 +152,7 @@ int main(int argc, char **argv) {
   }
 
   if (reverse)
-    rc = run_reverse(in, out, buf, 65536, &err_off);
+    rc = run_reverse(in, out, lenient, buf, 65536, &err_off);
   else
     rc = run_forward(in, out, indent, buf, 65536, &err_off);
 

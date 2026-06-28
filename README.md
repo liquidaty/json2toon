@@ -146,12 +146,19 @@ Common options:
 | `-i, --input FILE`  | Read from `FILE` instead of standard input.             |
 | `-o, --output FILE` | Write to `FILE` instead of standard output.             |
 | `-r, --reverse`     | Convert TOON to JSON (default is JSON to TOON).          |
+| `--lenient`         | With `-r`, accept loosely-formatted TOON: treat any unquoted value as a string instead of rejecting it. |
 | `--indent N`        | Indent width in spaces for TOON output (default 2).     |
 | `-h, --help`        | Print usage and exit.                                   |
 | `-V, --version`     | Print version and exit.                                 |
 
 In reverse mode the emitted JSON is compact (no insignificant whitespace);
 numbers are passed through verbatim so a JSON → TOON → JSON round trip is exact.
+An empty (or whitespace-only) TOON document converts to `{}`, so the empty
+object round-trips on its own. By default the reverse parser is strict: a line
+that is not valid TOON — e.g. an unquoted value containing a stray `:`, comma,
+bracket, or brace that the forward path would have quoted — is reported as
+malformed rather than silently coerced into a string. Pass `--lenient` to
+restore the permissive behavior that accepts any unquoted value as a string.
 
 Exit status is `0` on success and non-zero on malformed input or I/O error; a
 diagnostic identifying the byte offset of the problem is written to standard

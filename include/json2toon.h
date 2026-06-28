@@ -93,6 +93,10 @@ typedef struct {
   unsigned max_depth;       /* maximum nesting depth (default 256) */
   size_t max_line_bytes;    /* cap on a single buffered input line
                              * (default 0 == a large built-in limit) */
+  int lenient;              /* if non-zero, accept any unquoted value as a bare
+                             * string instead of rejecting tokens that the
+                             * forward path would have quoted (default 0:
+                             * strict, so non-TOON junk is a parse error) */
 } toon2json_options;
 
 typedef struct toon2json toon2json_t;

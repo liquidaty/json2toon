@@ -89,6 +89,25 @@ static int convert_rev(const char *toon, size_t n, char **out) {
   return rc;
 }
 
+/* Reverse in lenient mode: any unquoted value is accepted as a bare string. */
+static int convert_rev_lenient(const char *toon, size_t n, char **out) {
+  sbuf b = {0, 0, 0, 0};
+  toon2json_options opt;
+  toon2json_t *t;
+  int rc;
+  memset(&opt, 0, sizeof opt);
+  opt.lenient = 1;
+  t = toon2json_new(sbuf_sink, &b, &opt);
+  if (!t) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
+  rc = toon2json_feed(t, toon, n);
+  if (rc == JSON2TOON_OK)
+    rc = toon2json_finish(t);
+  toon2json_delete(t);
+  if (!b.p) { b.p = (char *)calloc(1, 1); }
+  *out = b.p;
+  return rc;
+}
+
 /* Reverse: convert TOON -> JSON feeding one byte at a time. */
 static int convert_rev_streamed(const char *toon, size_t n, char **out) {
   sbuf b = {0, 0, 0, 0};
@@ -192,6 +211,21 @@ static void check_rev_ok(const char *name, const char *toon,
   }
   free(bulk);
   free(strm);
+}
+
+/* TOON -> JSON in lenient mode; expects success and an exact match. */
+static void check_rev_lenient_ok(const char *name, const char *toon,
+                                 const char *expect) {
+  char *out = NULL;
+  int rc = convert_rev_lenient(toon, strlen(toon), &out);
+  if (rc != JSON2TOON_OK || strcmp(out, expect) != 0) {
+    g_fail++;
+    printf("FAIL rev-lenient %s\n  input:    %s\n  expected: %s\n  got(%d):  %s\n",
+           name, toon, expect, rc, out ? out : "(null)");
+  } else {
+    g_pass++;
+  }
+  free(out);
 }
 
 static void check_rev_err(const char *name, const char *toon) {
@@ -402,8 +436,24 @@ int main(void) {
   /* CRLF tolerance */
   check_rev_ok("rev-crlf", "a: 1\r\nb: 2\r\n", "{\"a\":1,\"b\":2}");
 
+  /* empty object round-trips standalone (Fix 1) */
+  check_rev_ok("rev-whitespace-only", "   \n\n  \n", "{}");
+  check_roundtrip("rt-empty-object", "{}");
+
   /* malformed TOON */
   check_rev_err("rev-err-unterminated-quote", "v: \"abc\n");
+  check_rev_err("rev-err-junk-colons", ":::garbage:::\n");
+  check_rev_err("rev-err-junk-value", "a: b:c\n");
+  check_rev_err("rev-err-junk-bracket", "x: a]b\n");
+
+  /* the same junk is accepted as a bare string under --lenient */
+  check_rev_lenient_ok("rev-lenient-junk-colons", ":::garbage:::\n",
+                       "\":::garbage:::\"");
+  check_rev_lenient_ok("rev-lenient-junk-value", "a: b:c\n",
+                       "{\"a\":\"b:c\"}");
+  /* well-formed bare strings still convert identically in either mode */
+  check_rev_lenient_ok("rev-lenient-plain", "hello world\n",
+                       "\"hello world\"");
   check_rev_err("rev-err-trailing-after-scalar", "42\nx\n");
   check_rev_err("rev-err-bad-tabular-arity", "[2]{a,b}:\n  1\n");
   check_rev_err("rev-err-count-mismatch-inline", "n[3]: 1,2\n");
