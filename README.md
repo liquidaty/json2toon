@@ -23,6 +23,9 @@ The result typically encodes the same structured data in noticeably fewer tokens
 while remaining readable to a person. `json2toon` exists to produce TOON quickly
 and cheaply from JSON you already have.
 
+The canonical TOON specification — which this library targets — is maintained at
+<https://github.com/toon-format/spec>.
+
 ## Features
 
 - **Pure C, maximum portability.** Written to a pinned C standard with no
