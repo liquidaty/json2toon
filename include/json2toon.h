@@ -14,6 +14,7 @@
 #define JSON2TOON_H
 
 #include <stddef.h>
+#include <stdio.h>   /* FILE, for the stdio convenience layer at the bottom */
 
 #ifdef __cplusplus
 extern "C" {
@@ -123,6 +124,56 @@ size_t toon2json_error_offset(const toon2json_t *t2j);
 
 /* Human-readable description of a status code (TOON-oriented wording). */
 const char *toon2json_strerror(int rc);
+
+/* ====================================================================== *
+ *  stdio / convenience layer
+ *
+ *  Codec-agnostic glue built strictly on the push API above, so the streaming
+ *  guarantee is preserved (input is pumped in fixed-size chunks; output is
+ *  delivered through the sink). References no internal type; a single FILE sink
+ *  serves both directions because both converters take a json2toon_sink.
+ *
+ *  FILE ownership: none of these functions open or close `in` / `out` — the
+ *  caller owns both. The whole-document converters flush `out` on success, so a
+ *  deferred (buffered) write failure is reported as JSON2TOON_ERR_IO rather than
+ *  being lost; the caller is still responsible for fclose() and for checking it.
+ * ====================================================================== */
+
+/* A ready-made sink that writes each output chunk to a stdio FILE. Pass as the
+ * `sink` argument to json2toon_new() / toon2json_new(), with `ctx` set to a
+ * (valid, writable) FILE *. Returns 0 on success, non-zero on a short write
+ * (which the converter surfaces as JSON2TOON_ERR_IO). */
+int json2toon_file_sink(const char *data, size_t len, void *file);
+
+/* fwrite(3)-signature adapters: feed size*nmemb bytes at `ptr` into the
+ * converter (`json2toon_t *` / `toon2json_t *`). Returns nmemb on success, or 0
+ * once the converter is in an error state — a short count, which tells an
+ * fwrite-style producer to stop. size==0 or nmemb==0 is a no-op returning nmemb;
+ * on a size*nmemb overflow it returns 0. */
+size_t json2toon_feed_fwrite(const void *ptr, size_t size, size_t nmemb, void *j2t);
+size_t toon2json_feed_fwrite(const void *ptr, size_t size, size_t nmemb, void *t2j);
+
+/* Convert all of `in` (read to EOF) to the other format, written to `out`.
+ * `opts` may be NULL for defaults. On a negative return, *error_offset (if
+ * non-NULL) receives the input byte offset of the error (as *_error_offset());
+ * it is set to 0 for errors with no input position (e.g. allocation failure, or
+ * a flush-time IO error after the document was already consumed). Returns
+ * JSON2TOON_OK or a negative JSON2TOON_ERR_*.
+ *
+ * Empty input is NOT special-cased; it takes each codec's natural meaning:
+ * json2toon treats an empty document as a parse error (JSON2TOON_ERR_PARSE,
+ * offset 0), whereas toon2json treats empty / whitespace-only input as the
+ * empty object (JSON2TOON_OK, output "{}"). Callers wanting "produced nothing"
+ * to mean success must handle that above this layer. */
+int json2toon_convert_file(FILE *in, FILE *out, const json2toon_options *opts, size_t *error_offset);
+int toon2json_convert_file(FILE *in, FILE *out, const toon2json_options *opts, size_t *error_offset);
+
+/* Convert the in-memory document [buf, buf+len) to `out`. Same return/offset and
+ * empty-input semantics as the *_convert_file() forms. A NULL `buf` with len==0
+ * is the empty document; a NULL `buf` with len>0 is a usage error
+ * (JSON2TOON_ERR_USAGE). */
+int json2toon_convert_mem(const char *buf, size_t len, FILE *out, const json2toon_options *opts, size_t *error_offset);
+int toon2json_convert_mem(const char *buf, size_t len, FILE *out, const toon2json_options *opts, size_t *error_offset);
 
 #ifdef __cplusplus
 }

@@ -269,6 +269,185 @@ static void check_roundtrip(const char *name, const char *json) {
   free(back);
 }
 
+/* --------------------------------------------- stdio / convenience layer */
+
+/* Read all of `f` (rewound to the start) into a malloc'd NUL-terminated
+ * buffer. Returns NULL only on allocation failure. */
+static char *slurp(FILE *f) {
+  size_t cap = 256, len = 0;
+  char *p = (char *)malloc(cap);
+  if (!p)
+    return NULL;
+  rewind(f);
+  for (;;) {
+    size_t got;
+    if (len + 1 >= cap) {
+      char *np = (char *)realloc(p, cap * 2);
+      if (!np) { free(p); return NULL; }
+      p = np;
+      cap *= 2;
+    }
+    got = fread(p + len, 1, cap - len - 1, f);
+    len += got;
+    if (got == 0)
+      break;
+  }
+  p[len] = '\0';
+  return p;
+}
+
+/* Compare a converter result; want==NULL means "don't check the output". */
+static void cv_eq(const char *name, int rc, int want_rc,
+                  const char *got, const char *want) {
+  if (rc != want_rc || (want && (!got || strcmp(got, want) != 0))) {
+    g_fail++;
+    printf("FAIL %s\n  rc=%d (want %d)\n  got:  %s\n  want: %s\n",
+           name, rc, want_rc, got ? got : "(null)", want ? want : "(any)");
+  } else {
+    g_pass++;
+  }
+}
+
+static void cv_bool(const char *name, int ok) {
+  if (ok) g_pass++;
+  else { g_fail++; printf("FAIL %s\n", name); }
+}
+
+static void run_convenience_tests(void) {
+  FILE *in, *out;
+  char *got;
+  size_t eoff, r;
+  int rc;
+
+  /* json2toon_file_sink: writes its bytes; len==0 is success, not a short write */
+  out = tmpfile();
+  if (out) {
+    rc = json2toon_file_sink("hello", 5, out);
+    got = slurp(out);
+    cv_eq("sink-basic", rc, 0, got, "hello");
+    free(got);
+    cv_bool("sink-empty", json2toon_file_sink("", 0, out) == 0);
+    fclose(out);
+  } else cv_bool("sink-basic(tmpfile)", 0);
+
+  /* convert_mem forward + reverse */
+  out = tmpfile();
+  if (out) {
+    eoff = 12345;
+    rc = json2toon_convert_mem("{\"a\":1}", 7, out, NULL, &eoff);
+    got = slurp(out);
+    cv_eq("mem-fwd", rc, JSON2TOON_OK, got, "a: 1\n");
+    free(got); fclose(out);
+  }
+  out = tmpfile();
+  if (out) {
+    rc = toon2json_convert_mem("a: 1\n", 5, out, NULL, NULL);
+    got = slurp(out);
+    cv_eq("mem-rev", rc, JSON2TOON_OK, got, "{\"a\":1}");
+    free(got); fclose(out);
+  }
+
+  /* convert_file forward via temp in/out */
+  in = tmpfile(); out = tmpfile();
+  if (in && out) {
+    cv_bool("file-fwd(write)", fwrite("{\"a\":1}", 1, 7, in) == 7);
+    rewind(in);
+    rc = json2toon_convert_file(in, out, NULL, NULL);
+    got = slurp(out);
+    cv_eq("file-fwd", rc, JSON2TOON_OK, got, "a: 1\n");
+    free(got);
+  }
+  if (in) fclose(in);
+  if (out) fclose(out);
+
+  /* empty input: forward -> ERR_PARSE @0 ; reverse -> OK "{}" (codec-faithful) */
+  out = tmpfile();
+  if (out) {
+    eoff = 999;
+    rc = json2toon_convert_mem("", 0, out, NULL, &eoff);
+    cv_eq("mem-empty-fwd", rc, JSON2TOON_ERR_PARSE, NULL, NULL);
+    cv_bool("mem-empty-fwd-offset", eoff == 0);
+    fclose(out);
+  }
+  out = tmpfile();
+  if (out) {
+    rc = toon2json_convert_mem("", 0, out, NULL, NULL);
+    got = slurp(out);
+    cv_eq("mem-empty-rev", rc, JSON2TOON_OK, got, "{}");
+    free(got); fclose(out);
+  }
+  in = tmpfile(); out = tmpfile();
+  if (in && out) {                                  /* in left empty */
+    rc = json2toon_convert_file(in, out, NULL, NULL);
+    cv_eq("file-empty-fwd", rc, JSON2TOON_ERR_PARSE, NULL, NULL);
+  }
+  if (in) fclose(in);
+  if (out) fclose(out);
+
+  /* convert_mem NULL handling: NULL+len -> USAGE; NULL+0 -> empty doc */
+  out = tmpfile();
+  if (out) {
+    rc = json2toon_convert_mem(NULL, 5, out, NULL, NULL);
+    cv_eq("mem-null-usage", rc, JSON2TOON_ERR_USAGE, NULL, NULL);
+    rc = json2toon_convert_mem(NULL, 0, out, NULL, NULL);
+    cv_eq("mem-null-empty", rc, JSON2TOON_ERR_PARSE, NULL, NULL);
+    fclose(out);
+  }
+
+  /* feed_fwrite drives a converter in chunks, then finish */
+  out = tmpfile();
+  if (out) {
+    json2toon_t *j = json2toon_new(json2toon_file_sink, out, NULL);
+    if (j) {
+      cv_bool("fwrite-chunk1", json2toon_feed_fwrite("{\"a\"", 1, 4, j) == 4);
+      cv_bool("fwrite-chunk2", json2toon_feed_fwrite(":1}", 1, 3, j) == 3);
+      rc = json2toon_finish(j);
+      got = slurp(out);
+      cv_eq("fwrite-output", rc, JSON2TOON_OK, got, "a: 1\n");
+      free(got);
+      json2toon_delete(j);
+    } else cv_bool("fwrite-new", 0);
+    fclose(out);
+  }
+
+  /* feed_fwrite edge cases: overflow, nmemb==0, size==0, poisoned converter */
+  out = tmpfile();
+  if (out) {
+    json2toon_t *j = json2toon_new(json2toon_file_sink, out, NULL);
+    if (j) {
+      r = json2toon_feed_fwrite("x", 2, ((size_t)-1) / 2 + 1, j);
+      cv_bool("fwrite-overflow", r == 0);
+      cv_bool("fwrite-nmemb0", json2toon_feed_fwrite("x", 1, 0, j) == 0);
+      cv_bool("fwrite-size0", json2toon_feed_fwrite("x", 0, 7, j) == 7);
+      json2toon_delete(j);
+    }
+    fclose(out);
+  }
+  out = tmpfile();
+  if (out) {
+    json2toon_t *j = json2toon_new(json2toon_file_sink, out, NULL);
+    if (j) {                                        /* bare '}' is a parse error */
+      cv_bool("fwrite-poison", json2toon_feed_fwrite("}", 1, 1, j) == 0);
+      json2toon_delete(j);
+    }
+    fclose(out);
+  }
+
+#if defined(__unix__) || defined(__APPLE__)
+  /* short write -> ERR_IO: a read-only stream cannot be written. Unbuffered so
+   * the failure is reported at the sink call regardless of output size. */
+  {
+    FILE *ro = fopen("/dev/null", "r");
+    if (ro) {
+      setvbuf(ro, NULL, _IONBF, 0);
+      rc = json2toon_convert_mem("{\"a\":1}", 7, ro, NULL, NULL);
+      cv_eq("mem-io-error", rc, JSON2TOON_ERR_IO, NULL, NULL);
+      fclose(ro);
+    }
+  }
+#endif
+}
+
 int main(void) {
   /* primitives at root */
   check_ok("root-number", "42", "42\n");
@@ -475,6 +654,8 @@ int main(void) {
   check_roundtrip("rt-deep-list",
                   "[{\"status\":\"active\",\"details\":"
                   "{\"level\":\"high\",\"count\":5}}]");
+
+  run_convenience_tests();
 
   printf("\n%d passed, %d failed (SIMD backend reported at runtime)\n",
          g_pass, g_fail);

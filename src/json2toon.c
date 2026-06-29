@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define J2T_VERSION "1.0.0"
+#define J2T_VERSION "1.1.0"
 #define DELIM ','
 
 /* Parser states. */

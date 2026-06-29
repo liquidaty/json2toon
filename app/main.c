@@ -26,69 +26,20 @@ static void usage(FILE *f) {
     prog);
 }
 
-static int write_sink(const char *data, size_t len, void *ctx) {
-  FILE *out = (FILE *)ctx;
-  return fwrite(data, 1, len, out) == len ? 0 : -1;
-}
-
-/* Run the JSON -> TOON direction. Returns a json2toon status code. */
-static int run_forward(FILE *in, FILE *out, unsigned indent, char *buf,
-                       size_t bufsz, size_t *err_off) {
+/* Run the JSON -> TOON direction via the library's whole-FILE converter. */
+static int run_forward(FILE *in, FILE *out, unsigned indent, size_t *err_off) {
   json2toon_options opt;
-  json2toon_t *j2t;
-  size_t n;
-  int rc = JSON2TOON_OK;
-
   memset(&opt, 0, sizeof opt);
   opt.indent = indent;
-  j2t = json2toon_new(write_sink, out, &opt);
-  if (!j2t)
-    return JSON2TOON_ERR_MEMORY;
-
-  while ((n = fread(buf, 1, bufsz, in)) > 0) {
-    rc = json2toon_feed(j2t, buf, n);
-    if (rc != JSON2TOON_OK)
-      break;
-  }
-  if (rc == JSON2TOON_OK && ferror(in))
-    rc = JSON2TOON_ERR_IO;
-  else if (rc == JSON2TOON_OK)
-    rc = json2toon_finish(j2t);
-
-  if (rc != JSON2TOON_OK)
-    *err_off = json2toon_error_offset(j2t);
-  json2toon_delete(j2t);
-  return rc;
+  return json2toon_convert_file(in, out, &opt, err_off);
 }
 
-/* Run the TOON -> JSON direction. Returns a json2toon status code. */
-static int run_reverse(FILE *in, FILE *out, int lenient, char *buf, size_t bufsz,
-                       size_t *err_off) {
+/* Run the TOON -> JSON direction via the library's whole-FILE converter. */
+static int run_reverse(FILE *in, FILE *out, int lenient, size_t *err_off) {
   toon2json_options opt;
-  toon2json_t *t2j;
-  size_t n;
-  int rc = JSON2TOON_OK;
-
   memset(&opt, 0, sizeof opt);
   opt.lenient = lenient;
-  t2j = toon2json_new(write_sink, out, &opt);
-  if (!t2j)
-    return JSON2TOON_ERR_MEMORY;
-
-  while ((n = fread(buf, 1, bufsz, in)) > 0) {
-    rc = toon2json_feed(t2j, buf, n);
-    if (rc != JSON2TOON_OK)
-      break;
-  }
-  if (rc == JSON2TOON_OK && ferror(in))
-    rc = JSON2TOON_ERR_IO;
-  else if (rc == JSON2TOON_OK)
-    rc = toon2json_finish(t2j);
-
-  if (rc != JSON2TOON_OK)
-    *err_off = toon2json_error_offset(t2j);
-  toon2json_delete(t2j);
-  return rc;
+  return toon2json_convert_file(in, out, &opt, err_off);
 }
 
 int main(int argc, char **argv) {
@@ -97,7 +48,6 @@ int main(int argc, char **argv) {
   int reverse = 0;
   int lenient = 0;
   FILE *in = stdin, *out = stdout;
-  char *buf;
   size_t err_off = 0;
   int rc, i, status = 0;
 
@@ -144,17 +94,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  buf = (char *)malloc(65536);
-  if (!buf) {
-    fprintf(stderr, "%s: out of memory\n", prog);
-    status = 1;
-    goto done;
-  }
-
   if (reverse)
-    rc = run_reverse(in, out, lenient, buf, 65536, &err_off);
+    rc = run_reverse(in, out, lenient, &err_off);
   else
-    rc = run_forward(in, out, indent, buf, 65536, &err_off);
+    rc = run_forward(in, out, indent, &err_off);
 
   if (rc != JSON2TOON_OK) {
     if (rc == JSON2TOON_ERR_IO && ferror(in)) {
@@ -168,9 +111,6 @@ int main(int argc, char **argv) {
     status = 1;
   }
 
-  free(buf);
-
-done:
   if (in != stdin) fclose(in);
   if (out != stdout) { if (fclose(out) != 0 && status == 0) status = 1; }
   else fflush(out);

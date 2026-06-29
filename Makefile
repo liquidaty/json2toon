@@ -108,7 +108,8 @@ ALL_CFLAGS := $(BASE_CFLAGS) $(OPT_CFLAGS) $(SAN_CFLAGS) $(EXTRA_CFLAGS) $(CFLAG
 ALL_LDFLAGS := $(SAN_LDFLAGS) $(EXTRA_LDFLAGS) $(LDFLAGS)
 
 # ----------------------------------------------------- sources / artifacts
-LIB_SRCS := src/json2toon.c src/toon2json.c src/dom.c src/format.c src/simd.c
+LIB_SRCS := src/json2toon.c src/toon2json.c src/dom.c src/format.c src/simd.c \
+            src/convenience.c
 LIB_OBJS := $(LIB_SRCS:src/%.c=$(OBJDIR)/%.o)
 
 STATIC_LIB := $(BUILDDIR)/libjson2toon.a
