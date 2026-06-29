@@ -219,4 +219,4 @@ jobs:
       - name: Fuzz both directions
         run: |
           bin="$(make print-builddir | tail -1)/fuzz"
-          "$bin" -max_total_time=60 -print_final_stats=1
+          "$bin" -max_total_time=60 -print_final_stats=1 tests/corpus

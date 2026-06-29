@@ -448,6 +448,74 @@ static void run_convenience_tests(void) {
 #endif
 }
 
+/* ----------------------------------------------------- limit / DoS guards */
+
+static void check_fwd_limit(const char *name, const char *json,
+                            const json2toon_options *opt, int want) {
+  sbuf b = {0, 0, 0, 0};
+  json2toon_t *j = json2toon_new(sbuf_sink, &b, opt);
+  int rc;
+  if (!j) { g_fail++; printf("FAIL %s (new)\n", name); return; }
+  rc = json2toon_feed(j, json, strlen(json));
+  if (rc == JSON2TOON_OK)
+    rc = json2toon_finish(j);
+  json2toon_delete(j);
+  free(b.p);
+  cv_bool(name, rc == want);
+}
+
+static void check_rev_limit(const char *name, const char *toon,
+                            const toon2json_options *opt, int want) {
+  sbuf b = {0, 0, 0, 0};
+  toon2json_t *t = toon2json_new(sbuf_sink, &b, opt);
+  int rc;
+  if (!t) { g_fail++; printf("FAIL %s (new)\n", name); return; }
+  rc = toon2json_feed(t, toon, strlen(toon));
+  if (rc == JSON2TOON_OK)
+    rc = toon2json_finish(t);
+  toon2json_delete(t);
+  free(b.p);
+  cv_bool(name, rc == want);
+}
+
+/* The DEPTH/LIMIT guards exist for untrusted input; exercise both directions so
+ * a future refactor cannot silently weaken them. */
+static void run_limit_tests(void) {
+  json2toon_options fo;
+  toon2json_options ro;
+
+  /* forward: object nesting deeper than max_depth -> ERR_DEPTH; the same input
+   * within a generous limit converts cleanly (control). (The depth guard counts
+   * open objects; deeply nested arrays are bounded by max_array_bytes instead.) */
+  memset(&fo, 0, sizeof fo);
+  fo.max_depth = 2;
+  check_fwd_limit("limit-fwd-depth", "{\"a\":{\"b\":{\"c\":{\"d\":1}}}}", &fo,
+                  JSON2TOON_ERR_DEPTH);
+  memset(&fo, 0, sizeof fo);
+  fo.max_depth = 64;
+  check_fwd_limit("limit-fwd-depth-ok", "{\"a\":{\"b\":{\"c\":{\"d\":1}}}}", &fo,
+                  JSON2TOON_OK);
+
+  /* forward: a buffered primitive array larger than max_array_bytes -> LIMIT */
+  memset(&fo, 0, sizeof fo);
+  fo.max_array_bytes = 4;
+  check_fwd_limit("limit-fwd-array", "[1,2,3,4,5,6,7,8,9,10,11,12]", &fo,
+                  JSON2TOON_ERR_LIMIT);
+
+  /* reverse: indentation deeper than max_depth -> ERR_DEPTH */
+  memset(&ro, 0, sizeof ro);
+  ro.max_depth = 2;
+  check_rev_limit("limit-rev-depth", "a:\n  b:\n    c:\n      d: 1\n", &ro,
+                  JSON2TOON_ERR_DEPTH);
+
+  /* reverse: a single line longer than max_line_bytes -> ERR_LIMIT */
+  memset(&ro, 0, sizeof ro);
+  ro.max_line_bytes = 4;
+  check_rev_limit("limit-rev-line",
+                  "key: a fairly long scalar value exceeding the cap\n", &ro,
+                  JSON2TOON_ERR_LIMIT);
+}
+
 int main(void) {
   /* primitives at root */
   check_ok("root-number", "42", "42\n");
@@ -656,6 +724,7 @@ int main(void) {
                   "{\"level\":\"high\",\"count\":5}}]");
 
   run_convenience_tests();
+  run_limit_tests();
 
   printf("\n%d passed, %d failed (SIMD backend reported at runtime)\n",
          g_pass, g_fail);

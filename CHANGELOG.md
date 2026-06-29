@@ -21,8 +21,19 @@ the generated `json2toon.pc` both derive from it.
   `JSON2TOON_VERSION_NUMBER` macros so consumers can require a minimum floor at
   compile time.
 - Fuzz harness (`tests/fuzz.c`) driving both converter directions, with a
-  `fuzz` (libFuzzer) and `fuzz-standalone` (portable replay) make target and a
-  CI job.
+  `fuzz` (libFuzzer) and `fuzz-standalone` (portable replay) make target, a seed
+  corpus under `tests/corpus/`, and a CI job.
+- Controlled public ABI: a `JSON2TOON_API` export/visibility macro on every
+  public symbol, with `-DJSON2TOON_BUILD -fvisibility=hidden` for the library's
+  own translation units. Internal symbols no longer leak from the shared object,
+  and the Windows DLL gets a proper export table (DLL consumers define
+  `JSON2TOON_DLL`).
+- Versioned shared object: ELF soname `libjson2toon.so.MAJOR` (with the
+  conventional real/soname/dev symlink trio), macOS `-install_name` +
+  `-compatibility_version`/`-current_version`, both derived from
+  `JSON2TOON_VERSION`. `make install` creates the runtime symlinks.
+- Regression tests for the `max_depth` / `max_array_bytes` / `max_line_bytes`
+  guards (`JSON2TOON_ERR_DEPTH` / `ERR_LIMIT`) in both directions.
 
 ### Changed
 - SIMD scanner selection is now bound at static-initialization time instead of

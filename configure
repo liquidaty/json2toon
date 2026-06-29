@@ -76,17 +76,25 @@ esac
 # output, so the build and install rules must expect that name there (and only
 # there). Emitted to the config file as EXE_EXT.
 EXE_EXT=""
+
+# Library version, read once from the public header (single source of truth for
+# json2toon_version(), the .pc file, and the shared-object ABI name below).
+# soversion is the major component and is the soname / install_name ABI tag.
+version=$(sed -n 's/.*JSON2TOON_VERSION "\([^"]*\)".*/\1/p' include/json2toon.h | head -1)
+version="${version:-0.0.0}"
+soversion="${version%%.*}"
+
 case "$target_os" in
   darwin)
     SHLIB_EXT=dylib
-    SHLIB_LDFLAGS="-dynamiclib -install_name $prefix/lib/libjson2toon.dylib" ;;
+    SHLIB_LDFLAGS="-dynamiclib -install_name $prefix/lib/libjson2toon.$soversion.dylib -compatibility_version $soversion -current_version $version" ;;
   windows)
     SHLIB_EXT=dll
     SHLIB_LDFLAGS="-shared"
     EXE_EXT=".exe" ;;
   *)
     SHLIB_EXT=so
-    SHLIB_LDFLAGS="-shared -Wl,-soname,libjson2toon.so" ;;
+    SHLIB_LDFLAGS="-shared -Wl,-soname,libjson2toon.so.$soversion" ;;
 esac
 
 EXTRA_CFLAGS=""
@@ -120,11 +128,9 @@ ENABLE_SHARED = $enable_shared
 DEBUG_DEFAULT = $DEBUG_DEFAULT
 EOF
 
-# pkg-config file. Read the version from the public header so the .pc never
-# drifts from JSON2TOON_VERSION / json2toon_version() (single source of truth).
+# pkg-config file. Uses $version (read above) so it never drifts from
+# JSON2TOON_VERSION / json2toon_version() (single source of truth).
 if [ -f json2toon.pc.in ]; then
-  version=$(sed -n 's/.*JSON2TOON_VERSION "\([^"]*\)".*/\1/p' include/json2toon.h | head -1)
-  version="${version:-0.0.0}"
   sed -e "s#@PREFIX@#$prefix#g" \
       -e "s#@VERSION@#$version#g" json2toon.pc.in > json2toon.pc
 fi
