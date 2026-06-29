@@ -23,6 +23,9 @@ The result typically encodes the same structured data in noticeably fewer tokens
 while remaining readable to a person. `json2toon` exists to produce TOON quickly
 and cheaply from JSON you already have.
 
+The canonical TOON specification — which this library targets — is maintained at
+<https://github.com/toon-format/spec>.
+
 ## Features
 
 - **Pure C, maximum portability.** Written to a pinned C standard with no
@@ -249,11 +252,18 @@ single line (for example one tabular row), never by total input or output size.
 
 **Streaming and bounded memory.** The converter is a state machine over the JSON
 grammar. It never materializes the document tree; it emits TOON for each value as
-soon as it has parsed enough to do so unambiguously. The only structures that
-grow are a nesting stack (one small frame per level of object/array depth) and,
-for the tabular array encoding, a header describing the current row's columns.
-Both are bounded by the *shape* of the data you accept, not its length, and both
-have configurable limits so adversarial input cannot force unbounded growth.
+soon as it has parsed enough to do so unambiguously. Objects and primitives
+stream directly. Arrays are the one construct TOON cannot emit before the whole
+array is seen — its `[N]` count and tabular column set are only known at the end
+— so each array's raw bytes are captured into a backing store that keeps a
+configurable lookahead window in RAM (`lookahead_buffer_size`, default 1 MiB) and
+spills the overflow to a temp file; the array is then validated and encoded by
+streaming over that store, never by building a value tree. Peak memory is thus
+bounded by the lookahead window, the nesting depth (one small frame per level),
+and the width of a single tabular row — by the *shape* of the data you accept,
+not its length — and each of those has a configurable limit so adversarial input
+cannot force unbounded growth. The lookahead size never changes the output, which
+is byte-identical whether an array stayed in RAM or spilled to disk.
 
 **SIMD.** Vectorization is applied to the character-classification work that
 dominates a converter's time: skipping insignificant whitespace, finding the end

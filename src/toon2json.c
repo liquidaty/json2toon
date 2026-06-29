@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define T2J_DEFAULT_DEPTH 256
+#define T2J_DEFAULT_DEPTH 128
 #define T2J_DEFAULT_LINE_BYTES (64u * 1024u * 1024u)
 #define U_UNSET ((unsigned)-1)
 
@@ -781,7 +781,7 @@ static void process_line(toon2json *t) {
   /* count leading spaces */
   while (indent < clen && content[indent] == ' ')
     indent++;
-  content += indent;
+  if (indent) content += indent;          /* avoid NULL+0 UB on an empty line */
   clen -= indent;
 
   if (clen == 0)
@@ -982,7 +982,6 @@ toon2json *toon2json_new(json2toon_sink sink, void *ctx,
     t->opt.lenient = opts->lenient;
   }
 
-  j2t_simd_init();
   /* indent width is irrelevant for JSON output; pass 0 */
   j2t_out_init(&t->out, sink, ctx, 0);
   t->state = ST_START;

@@ -5,15 +5,16 @@
  * memory bounded by its nesting depth, not its length. Arrays are the one
  * construct TOON cannot emit without buffering (the "[N]" count and tabular
  * column set are only knowable after the whole array is seen); each array's raw
- * text is captured, parsed into a value tree (dom.c), encoded, and freed, so
- * peak memory is bounded by the largest single array, not the whole stream.
+ * text is captured into a backing store (store.c, which spills to a temp file
+ * past a RAM threshold), validated and encoded by streaming over that store
+ * (encode_array.c), then released. Peak memory is bounded by a fixed lookahead
+ * window plus a shallow parse stack -- not by array length.
  */
 #include "internal.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-#define J2T_VERSION "1.0.0"
 #define DELIM ','
 
 /* Parser states. */
@@ -63,8 +64,9 @@ struct json2toon {
   /* literal lexer */
   const char *lit_expect; int lit_pos; int lit_kind;
 
-  /* array capture */
-  char *cap; size_t caplen, capcap;
+  /* array capture: raw bytes go to `store` (RAM, spilling to a temp file past a
+   * threshold); the rest tracks bracket/string nesting to find the array end. */
+  j2t_store store;
   int cap_depth, cap_in_str, cap_escape;
   int cap_has_key;
   unsigned cap_level;
@@ -161,31 +163,36 @@ static void emit_value_line(json2toon *j, int kind) {
 
 /* ----------------------------------------------------------- array capture */
 
+/* Append a run of captured bytes to the store, enforcing max_array_bytes and
+ * mapping store errors. Returns 0, or -1 and sets the sticky error at `off`. */
+static int cap_append(json2toon *j, const char *p, size_t n, size_t off) {
+  if (n == 0)
+    return 0;
+  if (j->opt.max_array_bytes &&
+      j2t_store_size(&j->store) + n > j->opt.max_array_bytes) {
+    set_err(j, JSON2TOON_ERR_LIMIT, off);
+    return -1;
+  }
+  if (j2t_store_append(&j->store, p, n) != 0) {
+    set_err(j, j->store.err, off);
+    return -1;
+  }
+  return 0;
+}
+
 static void capture_done(json2toon *j) {
-  j2t_arena *a = j2t_arena_new();
-  j2t_node *node;
-  size_t errpos = 0;
-  int oom = 0;
-  if (!a) {
-    set_err(j, JSON2TOON_ERR_MEMORY, j->cap_start_off);
-    return;
-  }
-  node = j2t_dom_parse(a, j->cap, j->caplen, &errpos, &oom);
-  if (!node) {
-    j2t_arena_free(a);
-    if (oom)
-      set_err(j, JSON2TOON_ERR_MEMORY, j->cap_start_off);
-    else
-      set_err(j, JSON2TOON_ERR_PARSE, j->cap_start_off + errpos);
-    return;
-  }
-  j2t_encode_array(&j->out, node, j->cap_level,
-                   j->cap_has_key ? j->key : NULL,
-                   j->cap_has_key ? j->keylen : 0);
-  j2t_arena_free(a);
-  j->caplen = 0;
-  if (j->out.err != JSON2TOON_OK) {
-    set_err(j, j->out.err, j->stream_offset);
+  uint64_t errpos = 0;
+  int rc = j2t_encode_captured(&j->out, &j->store, j->cap_level,
+                               j->cap_has_key ? j->key : NULL,
+                               j->cap_has_key ? j->keylen : 0,
+                               j->opt.max_depth, &errpos);
+  /* Free the captured bytes (and any temp file) on every path. */
+  j2t_store_reset(&j->store);
+  if (rc != JSON2TOON_OK) {
+    size_t off = (rc == JSON2TOON_ERR_PARSE || rc == JSON2TOON_ERR_DEPTH)
+                     ? j->cap_start_off + (size_t)errpos
+                     : j->cap_start_off;
+    set_err(j, rc, off);
     return;
   }
   finish_value(j);
@@ -346,12 +353,12 @@ static void begin_array(json2toon *j, size_t off) {
   j->cap_has_key = j->has_key;
   j->cap_level = j->has_key ? (unsigned)(j->depth - 1) : 0;
   j->cap_start_off = off;
-  j->caplen = 0;
   j->cap_depth = 1;
   j->cap_in_str = 0;
   j->cap_escape = 0;
-  if (buf_putc(&j->cap, &j->caplen, &j->capcap, '[') != 0) {
-    set_err(j, JSON2TOON_ERR_MEMORY, off);
+  j2t_store_reset(&j->store);
+  if (j2t_store_append(&j->store, "[", 1) != 0) {
+    set_err(j, j->store.err, off);
     return;
   }
   j->state = ST_ARR_CAP;
@@ -484,17 +491,12 @@ int json2toon_feed(json2toon *j, const char *data, size_t len) {
         break;
       }
       case ST_ARR_CAP: {
+        /* Scan for the array's closing bracket, tracking string/escape and
+         * nesting, but append captured bytes in bulk runs (so a spilled store
+         * is not written one byte at a time). */
+        const char *seg = p;
         while (p < end) {
           char c = *p++;
-          if (j->opt.max_array_bytes &&
-              j->caplen + 1 > j->opt.max_array_bytes) {
-            set_err(j, JSON2TOON_ERR_LIMIT, base + (size_t)(p - 1 - data));
-            break;
-          }
-          if (buf_putc(&j->cap, &j->caplen, &j->capcap, c) != 0) {
-            set_err(j, JSON2TOON_ERR_MEMORY, base + (size_t)(p - 1 - data));
-            break;
-          }
           if (j->cap_in_str) {
             if (j->cap_escape) j->cap_escape = 0;
             else if (c == '\\') j->cap_escape = 1;
@@ -504,12 +506,18 @@ int json2toon_feed(json2toon *j, const char *data, size_t len) {
             else if (c == '[' || c == '{') j->cap_depth++;
             else if (c == ']' || c == '}') {
               if (--j->cap_depth == 0) {
-                capture_done(j);
+                /* the closing byte is part of the array */
+                if (cap_append(j, seg, (size_t)(p - seg),
+                               base + (size_t)(seg - data)) == 0)
+                  capture_done(j);
+                seg = p;
                 break;
               }
             }
           }
         }
+        if (j->state == ST_ARR_CAP && p > seg)
+          cap_append(j, seg, (size_t)(p - seg), base + (size_t)(seg - data));
         break;
       }
       case ST_DONE: {
@@ -575,15 +583,21 @@ json2toon *json2toon_new(json2toon_sink sink, void *ctx,
     return NULL;
 
   j->opt.indent = 2;
-  j->opt.max_depth = 256;
+  j->opt.max_depth = 128;
   j->opt.max_array_bytes = 0;            /* 0 == unlimited */
+  j->opt.lookahead_buffer_size = 1u << 20;   /* 1 MiB */
+  j->opt.get_temp_filename = NULL;       /* NULL == tmpfile() */
   if (opts) {
     if (opts->indent) j->opt.indent = opts->indent;
     if (opts->max_depth) j->opt.max_depth = opts->max_depth;
     j->opt.max_array_bytes = opts->max_array_bytes;
+    if (opts->lookahead_buffer_size)
+      j->opt.lookahead_buffer_size = opts->lookahead_buffer_size;
+    j->opt.get_temp_filename = opts->get_temp_filename;
   }
 
-  j2t_simd_init();
+  j2t_store_init(&j->store, j->opt.lookahead_buffer_size,
+                 j->opt.get_temp_filename);
   j2t_out_init(&j->out, sink, ctx, j->opt.indent);
   j->state = ST_VALUE;
   j->err = JSON2TOON_OK;
@@ -595,7 +609,7 @@ void json2toon_delete(json2toon *j) {
     return;
   free(j->key);
   free(j->tok);
-  free(j->cap);
+  j2t_store_free(&j->store);
   free(j);
 }
 
@@ -616,4 +630,4 @@ const char *json2toon_strerror(int rc) {
   }
 }
 
-const char *json2toon_version(void) { return J2T_VERSION; }
+const char *json2toon_version(void) { return JSON2TOON_VERSION; }

@@ -31,99 +31,68 @@ static int sbuf_sink(const char *data, size_t n, void *ctx) {
   return 0;
 }
 
-/* Convert in one shot. *out is a malloc'd NUL-terminated string (caller frees).
- * Returns the json2toon status code. */
+/* Direction vtable: forward and reverse drivers differ only in which push
+ * functions they call (void* converter handles let one driver serve both). */
+typedef struct {
+  int (*feed)(void *c, const char *d, size_t n);
+  int (*finish)(void *c);
+  void (*destroy)(void *c);
+} codec;
+static int  j2t_feed(void *c, const char *d, size_t n) { return json2toon_feed(c, d, n); }
+static int  j2t_fin(void *c) { return json2toon_finish(c); }
+static void j2t_del(void *c) { json2toon_delete(c); }
+static int  t2j_feed(void *c, const char *d, size_t n) { return toon2json_feed(c, d, n); }
+static int  t2j_fin(void *c) { return toon2json_finish(c); }
+static void t2j_del(void *c) { toon2json_delete(c); }
+static const codec FWD = { j2t_feed, j2t_fin, j2t_del };
+static const codec REV = { t2j_feed, t2j_fin, t2j_del };
+
+/* Drive a freshly created converter to completion: feed `in` whole (chunk==0)
+ * or in chunk-byte pieces, finish, destroy. *out gets a malloc'd NUL-terminated
+ * copy of the output (caller frees). Returns the status code. */
+static int drive(void *conv, const codec *c, sbuf *b, const char *in, size_t n,
+                 size_t chunk, char **out) {
+  int rc = JSON2TOON_OK;
+  size_t i;
+  if (!conv) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
+  if (chunk == 0)
+    rc = c->feed(conv, in, n);
+  else
+    for (i = 0; i < n && rc == JSON2TOON_OK; i += chunk)
+      rc = c->feed(conv, in + i, chunk < n - i ? chunk : n - i);
+  if (rc == JSON2TOON_OK)
+    rc = c->finish(conv);
+  c->destroy(conv);
+  if (!b->p) b->p = (char *)calloc(1, 1);
+  *out = b->p;
+  return rc;
+}
+
+/* JSON -> TOON, whole input and one byte at a time (to cross every boundary). */
 static int convert(const char *json, size_t n, unsigned indent, char **out) {
   sbuf b = {0, 0, 0, 0};
-  json2toon_options opt;
-  json2toon_t *j;
-  int rc;
-  memset(&opt, 0, sizeof opt);
-  opt.indent = indent;
-  j = json2toon_new(sbuf_sink, &b, &opt);
-  if (!j) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
-  rc = json2toon_feed(j, json, n);
-  if (rc == JSON2TOON_OK)
-    rc = json2toon_finish(j);
-  json2toon_delete(j);
-  if (!b.p) { b.p = (char *)calloc(1, 1); }
-  *out = b.p;
-  return rc;
+  json2toon_options o; memset(&o, 0, sizeof o); o.indent = indent;
+  return drive(json2toon_new(sbuf_sink, &b, &o), &FWD, &b, json, n, 0, out);
 }
-
-/* Convert feeding one byte at a time, to exercise every chunk boundary. */
-static int convert_streamed(const char *json, size_t n, unsigned indent,
-                            char **out) {
+static int convert_streamed(const char *json, size_t n, unsigned indent, char **out) {
   sbuf b = {0, 0, 0, 0};
-  json2toon_options opt;
-  json2toon_t *j;
-  int rc = JSON2TOON_OK;
-  size_t i;
-  memset(&opt, 0, sizeof opt);
-  opt.indent = indent;
-  j = json2toon_new(sbuf_sink, &b, &opt);
-  if (!j) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
-  for (i = 0; i < n && rc == JSON2TOON_OK; i++)
-    rc = json2toon_feed(j, json + i, 1);
-  if (rc == JSON2TOON_OK)
-    rc = json2toon_finish(j);
-  json2toon_delete(j);
-  if (!b.p) { b.p = (char *)calloc(1, 1); }
-  *out = b.p;
-  return rc;
+  json2toon_options o; memset(&o, 0, sizeof o); o.indent = indent;
+  return drive(json2toon_new(sbuf_sink, &b, &o), &FWD, &b, json, n, 1, out);
 }
 
-/* Reverse: convert TOON -> JSON in one shot. */
+/* TOON -> JSON: strict bulk, lenient bulk, and one-byte-streamed. */
 static int convert_rev(const char *toon, size_t n, char **out) {
   sbuf b = {0, 0, 0, 0};
-  toon2json_t *t;
-  int rc;
-  t = toon2json_new(sbuf_sink, &b, NULL);
-  if (!t) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
-  rc = toon2json_feed(t, toon, n);
-  if (rc == JSON2TOON_OK)
-    rc = toon2json_finish(t);
-  toon2json_delete(t);
-  if (!b.p) { b.p = (char *)calloc(1, 1); }
-  *out = b.p;
-  return rc;
+  return drive(toon2json_new(sbuf_sink, &b, NULL), &REV, &b, toon, n, 0, out);
 }
-
-/* Reverse in lenient mode: any unquoted value is accepted as a bare string. */
 static int convert_rev_lenient(const char *toon, size_t n, char **out) {
   sbuf b = {0, 0, 0, 0};
-  toon2json_options opt;
-  toon2json_t *t;
-  int rc;
-  memset(&opt, 0, sizeof opt);
-  opt.lenient = 1;
-  t = toon2json_new(sbuf_sink, &b, &opt);
-  if (!t) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
-  rc = toon2json_feed(t, toon, n);
-  if (rc == JSON2TOON_OK)
-    rc = toon2json_finish(t);
-  toon2json_delete(t);
-  if (!b.p) { b.p = (char *)calloc(1, 1); }
-  *out = b.p;
-  return rc;
+  toon2json_options o; memset(&o, 0, sizeof o); o.lenient = 1;
+  return drive(toon2json_new(sbuf_sink, &b, &o), &REV, &b, toon, n, 0, out);
 }
-
-/* Reverse: convert TOON -> JSON feeding one byte at a time. */
 static int convert_rev_streamed(const char *toon, size_t n, char **out) {
   sbuf b = {0, 0, 0, 0};
-  toon2json_t *t;
-  int rc = JSON2TOON_OK;
-  size_t i;
-  t = toon2json_new(sbuf_sink, &b, NULL);
-  if (!t) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
-  for (i = 0; i < n && rc == JSON2TOON_OK; i++)
-    rc = toon2json_feed(t, toon + i, 1);
-  if (rc == JSON2TOON_OK)
-    rc = toon2json_finish(t);
-  toon2json_delete(t);
-  if (!b.p) { b.p = (char *)calloc(1, 1); }
-  *out = b.p;
-  return rc;
+  return drive(toon2json_new(sbuf_sink, &b, NULL), &REV, &b, toon, n, 1, out);
 }
 
 /* ----------------------------------------------------------------- harness */
@@ -267,6 +236,406 @@ static void check_roundtrip(const char *name, const char *json) {
   }
   free(toon);
   free(back);
+}
+
+/* ------------------------------------------ bounded-memory array options */
+
+/* Defined further below; forward-declared so this section can use them. */
+static void cv_bool(const char *name, int ok);
+static void check_fwd_limit(const char *name, const char *json,
+                            const json2toon_options *opt, int want);
+
+/* Forward conversion with explicit options, in both bulk and 1-byte-streamed
+ * modes; asserts both succeed and equal `expect`. Used to exercise the spill /
+ * temp-file paths and order-insensitive tabular detection. */
+static void check_opts_ok(const char *name, const char *json,
+                          const json2toon_options *o, const char *expect) {
+  sbuf b1 = {0, 0, 0, 0}, b2 = {0, 0, 0, 0};
+  char *o1 = NULL, *o2 = NULL;
+  size_t n = strlen(json);
+  int r1 = drive(json2toon_new(sbuf_sink, &b1, o), &FWD, &b1, json, n, 0, &o1);
+  int r2 = drive(json2toon_new(sbuf_sink, &b2, o), &FWD, &b2, json, n, 1, &o2);
+  int ok = r1 == JSON2TOON_OK && r2 == JSON2TOON_OK && o1 && o2 &&
+           strcmp(o1, expect) == 0 && strcmp(o2, expect) == 0;
+  if (!ok) {
+    g_fail++;
+    printf("FAIL %s\n  expected: %s\n  bulk(%d): %s\n  strm(%d): %s\n", name,
+           expect, r1, o1 ? o1 : "(null)", r2, o2 ? o2 : "(null)");
+  } else {
+    g_pass++;
+  }
+  free(o1);
+  free(o2);
+}
+
+/* The output must not depend on lookahead_buffer_size: a large (RAM-only)
+ * window and a tiny (spilling) one must produce byte-identical TOON. The small
+ * run also streams a byte at a time, crossing the spill boundary repeatedly. */
+static void check_determinism(const char *name, const char *json) {
+  json2toon_options big, small;
+  sbuf bb = {0, 0, 0, 0}, bs = {0, 0, 0, 0};
+  char *ob = NULL, *os = NULL;
+  size_t n = strlen(json);
+  int rb, rs;
+  memset(&big, 0, sizeof big);
+  memset(&small, 0, sizeof small);
+  big.lookahead_buffer_size = 1u << 20;     /* all in RAM */
+  small.lookahead_buffer_size = 8;          /* forces spill to a temp file */
+  rb = drive(json2toon_new(sbuf_sink, &bb, &big), &FWD, &bb, json, n, 0, &ob);
+  rs = drive(json2toon_new(sbuf_sink, &bs, &small), &FWD, &bs, json, n, 1, &os);
+  cv_bool(name, rb == JSON2TOON_OK && rs == JSON2TOON_OK && ob && os &&
+                    strcmp(ob, os) == 0);
+  free(ob);
+  free(os);
+}
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/stat.h>
+static char *dupstr(const char *s) {
+  size_t n = strlen(s) + 1;
+  char *p = (char *)malloc(n);
+  if (p) memcpy(p, s, n);
+  return p;
+}
+static int g_tmp_calls = 0;
+static char g_tmp_last[256];
+static char *test_tmpname(const char *prefix) {
+  (void)prefix;
+  snprintf(g_tmp_last, sizeof g_tmp_last, "/tmp/j2t_test_spill_%d.tmp",
+           g_tmp_calls++);
+  return dupstr(g_tmp_last);
+}
+static char *unwritable_tmpname(const char *prefix) {
+  (void)prefix;
+  return dupstr("/json2toon_no_such_dir/spill.tmp");
+}
+#endif
+
+static void run_array_store_tests(void) {
+  json2toon_options o;
+
+  /* Determinism across the spill boundary for every array form. */
+  check_determinism("spill-inline",
+                    "{\"tags\":[\"alpha\",\"beta\",\"gamma\",\"delta\"]}");
+  check_determinism("spill-tabular",
+                    "[{\"id\":1,\"name\":\"Alice\"},{\"id\":2,\"name\":\"Bob\"}]");
+  check_determinism("spill-list", "[1,{\"a\":1},\"a-fairly-long-scalar\"]");
+  check_determinism("spill-nested",
+                    "[[1,2,3,4,5,6],[7,8,9,10,11,12],[13,14,15,16,17,18]]");
+
+  /* tmpfile() fallback (NULL hook) with a tiny window: still succeeds. */
+  memset(&o, 0, sizeof o);
+  o.lookahead_buffer_size = 4;
+  check_opts_ok("spill-tmpfile-fallback", "[1,2,3,4,5,6,7,8,9,10]", &o,
+                "[10]: 1,2,3,4,5,6,7,8,9,10\n");
+
+  /* Order-insensitive tabular (TOON spec §9.3: same key SET, order may vary). */
+  check_ok("tabular-reordered-keys", "[{\"a\":1,\"b\":2},{\"b\":4,\"a\":3}]",
+           "[2]{a,b}:\n  1,2\n  3,4\n");
+  /* Reordered keys round-trip to the canonical (template-order) JSON. */
+  {
+    const char *src = "[{\"a\":1,\"b\":2},{\"b\":4,\"a\":3}]";
+    char *toon = NULL, *back = NULL;
+    int rc = convert(src, strlen(src), 2, &toon);
+    if (rc == JSON2TOON_OK)
+      rc = convert_rev(toon, strlen(toon), &back);
+    cv_bool("tabular-reordered-roundtrip",
+            rc == JSON2TOON_OK && back &&
+                strcmp(back, "[{\"a\":1,\"b\":2},{\"a\":3,\"b\":4}]") == 0);
+    free(toon);
+    free(back);
+  }
+
+  /* Set inequality / duplicate keys decline tabular and fall back to a list. */
+  check_ok("not-tabular-extra-key", "[{\"a\":1},{\"a\":1,\"b\":2}]",
+           "[2]:\n  - a: 1\n  - a: 1\n    b: 2\n");
+  check_ok("not-tabular-missing-key", "[{\"a\":1,\"b\":2},{\"a\":3}]",
+           "[2]:\n  - a: 1\n    b: 2\n  - a: 3\n");
+  check_ok("not-tabular-dup-key", "[{\"a\":1,\"a\":2}]",
+           "[1]:\n  - a: 1\n    a: 2\n");
+
+  /* Edge sweep: empty objects/arrays as list items. */
+  check_ok("list-empty-object-item", "[{}]", "[1]:\n  -\n");
+  check_ok("list-empty-array-item", "[[]]", "[1]:\n  - []\n");
+  check_ok("list-two-empty-objects", "[{},{}]", "[2]:\n  -\n  -\n");
+
+  /* Array nesting past max_depth -> ERR_DEPTH (now bounded like objects). */
+  memset(&o, 0, sizeof o);
+  o.max_depth = 3;
+  check_fwd_limit("limit-fwd-array-depth", "[[[[1]]]]", &o,
+                  JSON2TOON_ERR_DEPTH);
+  memset(&o, 0, sizeof o);
+  o.max_depth = 64;
+  check_fwd_limit("limit-fwd-array-depth-ok", "[[[[1]]]]", &o, JSON2TOON_OK);
+
+#if defined(__unix__) || defined(__APPLE__)
+  /* get_temp_filename hook: it is called for a spilling array, and the temp
+   * file it named is removed by the time conversion completes. */
+  {
+    char *out = NULL;
+    struct stat st;
+    sbuf b = {0, 0, 0, 0};
+    int rc;
+    memset(&o, 0, sizeof o);
+    o.lookahead_buffer_size = 4;
+    o.get_temp_filename = test_tmpname;
+    g_tmp_calls = 0;
+    rc = drive(json2toon_new(sbuf_sink, &b, &o), &FWD, &b,
+               "[1,2,3,4,5,6,7,8,9,10]", 22, 0, &out);
+    cv_bool("spill-hook-called", rc == JSON2TOON_OK && g_tmp_calls > 0);
+    cv_bool("spill-hook-file-removed", stat(g_tmp_last, &st) != 0);
+    free(out);
+  }
+
+  /* get_temp_filename pointing at an unwritable location -> ERR_IO. */
+  {
+    char *out = NULL;
+    sbuf b = {0, 0, 0, 0};
+    int rc;
+    memset(&o, 0, sizeof o);
+    o.lookahead_buffer_size = 4;
+    o.get_temp_filename = unwritable_tmpname;
+    rc = drive(json2toon_new(sbuf_sink, &b, &o), &FWD, &b,
+               "[1,2,3,4,5,6,7,8,9,10]", 22, 0, &out);
+    cv_bool("spill-io-error", rc == JSON2TOON_ERR_IO);
+    free(out);
+  }
+#endif
+}
+
+/* --------------------------------------------- stdio / convenience layer */
+
+/* Read all of `f` (rewound to the start) into a malloc'd NUL-terminated
+ * buffer. Returns NULL only on allocation failure. */
+static char *slurp(FILE *f) {
+  size_t cap = 256, len = 0;
+  char *p = (char *)malloc(cap);
+  if (!p)
+    return NULL;
+  rewind(f);
+  for (;;) {
+    size_t got;
+    if (len + 1 >= cap) {
+      char *np = (char *)realloc(p, cap * 2);
+      if (!np) { free(p); return NULL; }
+      p = np;
+      cap *= 2;
+    }
+    got = fread(p + len, 1, cap - len - 1, f);
+    len += got;
+    if (got == 0)
+      break;
+  }
+  p[len] = '\0';
+  return p;
+}
+
+/* Compare a converter result; want==NULL means "don't check the output". */
+static void cv_eq(const char *name, int rc, int want_rc,
+                  const char *got, const char *want) {
+  if (rc != want_rc || (want && (!got || strcmp(got, want) != 0))) {
+    g_fail++;
+    printf("FAIL %s\n  rc=%d (want %d)\n  got:  %s\n  want: %s\n",
+           name, rc, want_rc, got ? got : "(null)", want ? want : "(any)");
+  } else {
+    g_pass++;
+  }
+}
+
+static void cv_bool(const char *name, int ok) {
+  if (ok) g_pass++;
+  else { g_fail++; printf("FAIL %s\n", name); }
+}
+
+static void run_convenience_tests(void) {
+  FILE *in, *out;
+  char *got;
+  size_t eoff, r;
+  int rc;
+
+  /* json2toon_file_sink: writes its bytes; len==0 is success, not a short write */
+  out = tmpfile();
+  if (out) {
+    rc = json2toon_file_sink("hello", 5, out);
+    got = slurp(out);
+    cv_eq("sink-basic", rc, 0, got, "hello");
+    free(got);
+    cv_bool("sink-empty", json2toon_file_sink("", 0, out) == 0);
+    fclose(out);
+  } else cv_bool("sink-basic(tmpfile)", 0);
+
+  /* convert_mem forward + reverse */
+  out = tmpfile();
+  if (out) {
+    eoff = 12345;
+    rc = json2toon_convert_mem("{\"a\":1}", 7, out, NULL, &eoff);
+    got = slurp(out);
+    cv_eq("mem-fwd", rc, JSON2TOON_OK, got, "a: 1\n");
+    free(got); fclose(out);
+  }
+  out = tmpfile();
+  if (out) {
+    rc = toon2json_convert_mem("a: 1\n", 5, out, NULL, NULL);
+    got = slurp(out);
+    cv_eq("mem-rev", rc, JSON2TOON_OK, got, "{\"a\":1}");
+    free(got); fclose(out);
+  }
+
+  /* convert_file forward via temp in/out */
+  in = tmpfile(); out = tmpfile();
+  if (in && out) {
+    cv_bool("file-fwd(write)", fwrite("{\"a\":1}", 1, 7, in) == 7);
+    rewind(in);
+    rc = json2toon_convert_file(in, out, NULL, NULL);
+    got = slurp(out);
+    cv_eq("file-fwd", rc, JSON2TOON_OK, got, "a: 1\n");
+    free(got);
+  }
+  if (in) fclose(in);
+  if (out) fclose(out);
+
+  /* empty input: forward -> ERR_PARSE @0 ; reverse -> OK "{}" (codec-faithful) */
+  out = tmpfile();
+  if (out) {
+    eoff = 999;
+    rc = json2toon_convert_mem("", 0, out, NULL, &eoff);
+    cv_eq("mem-empty-fwd", rc, JSON2TOON_ERR_PARSE, NULL, NULL);
+    cv_bool("mem-empty-fwd-offset", eoff == 0);
+    fclose(out);
+  }
+  out = tmpfile();
+  if (out) {
+    rc = toon2json_convert_mem("", 0, out, NULL, NULL);
+    got = slurp(out);
+    cv_eq("mem-empty-rev", rc, JSON2TOON_OK, got, "{}");
+    free(got); fclose(out);
+  }
+  in = tmpfile(); out = tmpfile();
+  if (in && out) {                                  /* in left empty */
+    rc = json2toon_convert_file(in, out, NULL, NULL);
+    cv_eq("file-empty-fwd", rc, JSON2TOON_ERR_PARSE, NULL, NULL);
+  }
+  if (in) fclose(in);
+  if (out) fclose(out);
+
+  /* convert_mem NULL handling: NULL+len -> USAGE; NULL+0 -> empty doc */
+  out = tmpfile();
+  if (out) {
+    rc = json2toon_convert_mem(NULL, 5, out, NULL, NULL);
+    cv_eq("mem-null-usage", rc, JSON2TOON_ERR_USAGE, NULL, NULL);
+    rc = json2toon_convert_mem(NULL, 0, out, NULL, NULL);
+    cv_eq("mem-null-empty", rc, JSON2TOON_ERR_PARSE, NULL, NULL);
+    fclose(out);
+  }
+
+  /* feed_fwrite drives a converter in chunks, then finish */
+  out = tmpfile();
+  if (out) {
+    json2toon_t *j = json2toon_new(json2toon_file_sink, out, NULL);
+    if (j) {
+      cv_bool("fwrite-chunk1", json2toon_feed_fwrite("{\"a\"", 1, 4, j) == 4);
+      cv_bool("fwrite-chunk2", json2toon_feed_fwrite(":1}", 1, 3, j) == 3);
+      rc = json2toon_finish(j);
+      got = slurp(out);
+      cv_eq("fwrite-output", rc, JSON2TOON_OK, got, "a: 1\n");
+      free(got);
+      json2toon_delete(j);
+    } else cv_bool("fwrite-new", 0);
+    fclose(out);
+  }
+
+  /* feed_fwrite edge cases: overflow, nmemb==0, size==0, poisoned converter */
+  out = tmpfile();
+  if (out) {
+    json2toon_t *j = json2toon_new(json2toon_file_sink, out, NULL);
+    if (j) {
+      r = json2toon_feed_fwrite("x", 2, ((size_t)-1) / 2 + 1, j);
+      cv_bool("fwrite-overflow", r == 0);
+      cv_bool("fwrite-nmemb0", json2toon_feed_fwrite("x", 1, 0, j) == 0);
+      cv_bool("fwrite-size0", json2toon_feed_fwrite("x", 0, 7, j) == 7);
+      json2toon_delete(j);
+    }
+    fclose(out);
+  }
+  out = tmpfile();
+  if (out) {
+    json2toon_t *j = json2toon_new(json2toon_file_sink, out, NULL);
+    if (j) {                                        /* bare '}' is a parse error */
+      cv_bool("fwrite-poison", json2toon_feed_fwrite("}", 1, 1, j) == 0);
+      json2toon_delete(j);
+    }
+    fclose(out);
+  }
+
+#if defined(__unix__) || defined(__APPLE__)
+  /* short write -> ERR_IO: a read-only stream cannot be written. Unbuffered so
+   * the failure is reported at the sink call regardless of output size. */
+  {
+    FILE *ro = fopen("/dev/null", "r");
+    if (ro) {
+      setvbuf(ro, NULL, _IONBF, 0);
+      rc = json2toon_convert_mem("{\"a\":1}", 7, ro, NULL, NULL);
+      cv_eq("mem-io-error", rc, JSON2TOON_ERR_IO, NULL, NULL);
+      fclose(ro);
+    }
+  }
+#endif
+}
+
+/* ----------------------------------------------------- limit / DoS guards */
+
+static void check_fwd_limit(const char *name, const char *json,
+                            const json2toon_options *opt, int want) {
+  sbuf b = {0, 0, 0, 0}; char *out = NULL;
+  int rc = drive(json2toon_new(sbuf_sink, &b, opt), &FWD, &b, json, strlen(json), 0, &out);
+  free(out);
+  cv_bool(name, rc == want);
+}
+
+static void check_rev_limit(const char *name, const char *toon,
+                            const toon2json_options *opt, int want) {
+  sbuf b = {0, 0, 0, 0}; char *out = NULL;
+  int rc = drive(toon2json_new(sbuf_sink, &b, opt), &REV, &b, toon, strlen(toon), 0, &out);
+  free(out);
+  cv_bool(name, rc == want);
+}
+
+/* The DEPTH/LIMIT guards exist for untrusted input; exercise both directions so
+ * a future refactor cannot silently weaken them. */
+static void run_limit_tests(void) {
+  json2toon_options fo;
+  toon2json_options ro;
+
+  /* forward: object nesting deeper than max_depth -> ERR_DEPTH; the same input
+   * within a generous limit converts cleanly (control). Array nesting is bounded
+   * the same way now (see limit-fwd-array-depth in run_array_store_tests). */
+  memset(&fo, 0, sizeof fo);
+  fo.max_depth = 2;
+  check_fwd_limit("limit-fwd-depth", "{\"a\":{\"b\":{\"c\":{\"d\":1}}}}", &fo,
+                  JSON2TOON_ERR_DEPTH);
+  memset(&fo, 0, sizeof fo);
+  fo.max_depth = 64;
+  check_fwd_limit("limit-fwd-depth-ok", "{\"a\":{\"b\":{\"c\":{\"d\":1}}}}", &fo,
+                  JSON2TOON_OK);
+
+  /* forward: a buffered primitive array larger than max_array_bytes -> LIMIT */
+  memset(&fo, 0, sizeof fo);
+  fo.max_array_bytes = 4;
+  check_fwd_limit("limit-fwd-array", "[1,2,3,4,5,6,7,8,9,10,11,12]", &fo,
+                  JSON2TOON_ERR_LIMIT);
+
+  /* reverse: indentation deeper than max_depth -> ERR_DEPTH */
+  memset(&ro, 0, sizeof ro);
+  ro.max_depth = 2;
+  check_rev_limit("limit-rev-depth", "a:\n  b:\n    c:\n      d: 1\n", &ro,
+                  JSON2TOON_ERR_DEPTH);
+
+  /* reverse: a single line longer than max_line_bytes -> ERR_LIMIT */
+  memset(&ro, 0, sizeof ro);
+  ro.max_line_bytes = 4;
+  check_rev_limit("limit-rev-line",
+                  "key: a fairly long scalar value exceeding the cap\n", &ro,
+                  JSON2TOON_ERR_LIMIT);
 }
 
 int main(void) {
@@ -475,6 +844,10 @@ int main(void) {
   check_roundtrip("rt-deep-list",
                   "[{\"status\":\"active\",\"details\":"
                   "{\"level\":\"high\",\"count\":5}}]");
+
+  run_array_store_tests();
+  run_convenience_tests();
+  run_limit_tests();
 
   printf("\n%d passed, %d failed (SIMD backend reported at runtime)\n",
          g_pass, g_fail);

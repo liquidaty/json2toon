@@ -112,24 +112,23 @@ static const char *scan_string_neon(const char *p, const char *end) {
 
 /* ----------------------------------------------------------------- dispatch */
 
+/* The backend is fixed at compile time -- the #if block at the top of this file
+ * compiles in exactly one variant -- so the scanners are bound here at static-
+ * initialization time. There is no runtime mutation of these globals and thus
+ * no init handshake and no data race when converters are created concurrently
+ * from multiple threads. */
+#if defined(J2T_USE_NEON)
+j2t_scan_fn j2t_skip_ws = skip_ws_neon;
+j2t_scan_fn j2t_scan_string = scan_string_neon;
+static const char *const g_backend = "neon";
+#elif defined(J2T_USE_SSE2)
+j2t_scan_fn j2t_skip_ws = skip_ws_sse2;
+j2t_scan_fn j2t_scan_string = scan_string_sse2;
+static const char *const g_backend = "sse2";
+#else
 j2t_scan_fn j2t_skip_ws = skip_ws_scalar;
 j2t_scan_fn j2t_scan_string = scan_string_scalar;
-static const char *g_backend = "scalar";
-
-void j2t_simd_init(void) {
-#if defined(J2T_USE_NEON)
-  j2t_skip_ws = skip_ws_neon;
-  j2t_scan_string = scan_string_neon;
-  g_backend = "neon";
-#elif defined(J2T_USE_SSE2)
-  j2t_skip_ws = skip_ws_sse2;
-  j2t_scan_string = scan_string_sse2;
-  g_backend = "sse2";
-#else
-  j2t_skip_ws = skip_ws_scalar;
-  j2t_scan_string = scan_string_scalar;
-  g_backend = "scalar";
+static const char *const g_backend = "scalar";
 #endif
-}
 
 const char *j2t_simd_backend(void) { return g_backend; }
