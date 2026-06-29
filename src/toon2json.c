@@ -781,7 +781,7 @@ static void process_line(toon2json *t) {
   /* count leading spaces */
   while (indent < clen && content[indent] == ' ')
     indent++;
-  content += indent;
+  if (indent) content += indent;          /* avoid NULL+0 UB on an empty line */
   clen -= indent;
 
   if (clen == 0)

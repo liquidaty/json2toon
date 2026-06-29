@@ -35,6 +35,7 @@ typedef struct {
   j2t_out *out;
   j2t_reader rd;
   unsigned max_depth;
+  unsigned depth;            /* current structural-emit recursion depth */
   int err;                   /* sticky JSON2TOON_* (memory / io / parse) */
 
   char *dec; size_t deccap;          /* one decoded string or key */
@@ -421,6 +422,7 @@ static int collect_row(j2t_enc *e, uint64_t ostart) {
     sk_ws(e);
     c = j2t_reader_peek(&e->rd);
     if (c == '}') { j2t_reader_getc(&e->rd); break; }
+    if (c < 0) { e->err = JSON2TOON_ERR_PARSE; return -1; }  /* ran past end */
     if (c == ',') { j2t_reader_getc(&e->rd); sk_ws(e); }
     kstart = j2t_reader_tell(&e->rd);
     sk_string(e);
@@ -512,6 +514,7 @@ static void shape_array(j2t_enc *e, uint64_t astart, int *kind, size_t *count) {
     c = j2t_reader_peek(&e->rd);
     if (c == ']') { j2t_reader_getc(&e->rd); break; }
     if (c == ',') { j2t_reader_getc(&e->rd); sk_ws(e); c = j2t_reader_peek(&e->rd); }
+    if (c < 0) { e->err = JSON2TOON_ERR_PARSE; return; }  /* ran past end */
 
     if (c == '{') {
       uint64_t ostart = j2t_reader_tell(&e->rd);
@@ -546,6 +549,7 @@ static void shape_array(j2t_enc *e, uint64_t astart, int *kind, size_t *count) {
     sk_ws(e);
     c = j2t_reader_getc(&e->rd);
     if (c == ']') break;
+    if (c < 0) { e->err = JSON2TOON_ERR_PARSE; return; }  /* unterminated */
     /* otherwise c == ',' -> next element */
   }
 
@@ -602,17 +606,20 @@ static void emit_object_body(j2t_enc *e, uint64_t ostart, unsigned level,
                              int first_inline) {
   uint64_t cur;
   size_t idx = 0;
+  if (e->err || e->out->err) return;
+  if (e->depth >= e->max_depth) { e->err = JSON2TOON_ERR_DEPTH; return; }
+  e->depth++;
   j2t_reader_seek(&e->rd, ostart);
   j2t_reader_getc(&e->rd);                  /* '{' */
   cur = j2t_reader_tell(&e->rd);
   for (;;) {
     int c;
     uint64_t kstart, kend, vstart;
-    if (e->err || e->out->err) return;
+    if (e->err || e->out->err) break;
     j2t_reader_seek(&e->rd, cur);
     sk_ws(e);
     c = j2t_reader_peek(&e->rd);
-    if (c == '}') break;
+    if (c == '}' || c < 0) break;            /* close, or ran past end */
     if (c == ',') { j2t_reader_getc(&e->rd); sk_ws(e); }
     kstart = j2t_reader_tell(&e->rd);
     sk_string(e);
@@ -628,6 +635,7 @@ static void emit_object_body(j2t_enc *e, uint64_t ostart, unsigned level,
     emit_member_body(e, kstart, kend, vstart, level);
     idx++;
   }
+  e->depth--;
 }
 
 /* Emit one array element as a list item ("- ...") at `level`. */
@@ -685,11 +693,12 @@ static void emit_inline(j2t_enc *e, uint64_t astart, unsigned level,
     j2t_reader_seek(&e->rd, cur);
     sk_ws(e);
     c = j2t_reader_peek(&e->rd);
-    if (c == ']') break;
+    if (c == ']' || c < 0) break;            /* close, or ran past end */
     if (c == ',') { j2t_reader_getc(&e->rd); sk_ws(e); }
     cstart = j2t_reader_tell(&e->rd);
     sk_value(e);
     cend = j2t_reader_tell(&e->rd);
+    if (cend <= cstart) { e->err = JSON2TOON_ERR_PARSE; break; }  /* no progress */
     cur = cend;
     if (idx) j2t_putc(e->out, DELIM);
     emit_scalar_span(e, cstart, cend);
@@ -723,11 +732,12 @@ static void emit_tabular(j2t_enc *e, uint64_t astart, unsigned level,
     j2t_reader_seek(&e->rd, cur);
     sk_ws(e);
     c = j2t_reader_peek(&e->rd);
-    if (c == ']') break;
+    if (c == ']' || c < 0) break;            /* close, or ran past end */
     if (c == ',') { j2t_reader_getc(&e->rd); sk_ws(e); }
     ostart = j2t_reader_tell(&e->rd);
     if (collect_row(e, ostart) != 0) return;
     oend = j2t_reader_tell(&e->rd);
+    if (oend <= ostart) { e->err = JSON2TOON_ERR_PARSE; break; }  /* no progress */
     cur = oend;
     j2t_indent(e->out, level + 1);
     for (t = 0; t < e->tpl_n; t++) {
@@ -753,17 +763,19 @@ static void emit_list(j2t_enc *e, uint64_t astart, unsigned level,
   j2t_reader_getc(&e->rd);                  /* '[' */
   cur = j2t_reader_tell(&e->rd);
   for (;;) {
-    uint64_t cstart;
+    uint64_t cstart, cend;
     int c;
     if (e->err || e->out->err) return;
     j2t_reader_seek(&e->rd, cur);
     sk_ws(e);
     c = j2t_reader_peek(&e->rd);
-    if (c == ']') break;
+    if (c == ']' || c < 0) break;            /* close, or ran past end */
     if (c == ',') { j2t_reader_getc(&e->rd); sk_ws(e); }
     cstart = j2t_reader_tell(&e->rd);
     sk_value(e);
-    cur = j2t_reader_tell(&e->rd);
+    cend = j2t_reader_tell(&e->rd);
+    if (cend <= cstart) { e->err = JSON2TOON_ERR_PARSE; break; }  /* no progress */
+    cur = cend;
     emit_item(e, cstart, level + 1);
   }
 }
@@ -774,13 +786,17 @@ static void emit_array_tail(j2t_enc *e, uint64_t astart, unsigned level) {
   int kind;
   size_t count;
   if (e->err || e->out->err) return;
+  if (e->depth >= e->max_depth) { e->err = JSON2TOON_ERR_DEPTH; return; }
+  e->depth++;
   shape_array(e, astart, &kind, &count);
-  if (e->err) return;
-  switch (kind) {
-    case ARR_INLINE: emit_inline(e, astart, level, count); break;
-    case ARR_TABULAR: emit_tabular(e, astart, level, count); break;
-    default: emit_list(e, astart, level, count); break;
+  if (!e->err) {
+    switch (kind) {
+      case ARR_INLINE: emit_inline(e, astart, level, count); break;
+      case ARR_TABULAR: emit_tabular(e, astart, level, count); break;
+      default: emit_list(e, astart, level, count); break;
+    }
   }
+  e->depth--;
 }
 
 /* Top-level entry: indent, handle the empty array, place the key, then tail. */
