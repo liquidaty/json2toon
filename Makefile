@@ -131,18 +131,21 @@ LIB_OBJS := $(LIB_SRCS:src/%.c=$(OBJDIR)/%.o)
 
 STATIC_LIB := $(BUILDDIR)/libjson2toon.a
 
-# Shared-library file names, ABI-versioned on ELF/macOS. SHARED_LIB_REAL is the
-# real object; SHARED_LIB is the linker/dev name (a symlink to it on ELF/macOS,
-# the file itself on Windows). install(1) lays down the runtime symlinks too.
+# ABI-versioned shared-library names. SHARED_LIB_REAL is the real object;
+# SHARED_LIB is the dev/link name (a symlink to it, or the file itself on
+# Windows); SHLIB_NAMES lists every installed file (real + symlinks).
 ifeq ($(SHLIB_EXT),dll)
   SHARED_LIB_REAL := $(BUILDDIR)/libjson2toon.dll
   SHARED_LIB := $(SHARED_LIB_REAL)
+  SHLIB_NAMES := libjson2toon.dll
 else ifeq ($(SHLIB_EXT),dylib)
   SHARED_LIB_REAL := $(BUILDDIR)/libjson2toon.$(SOVERSION).dylib
   SHARED_LIB := $(BUILDDIR)/libjson2toon.dylib
+  SHLIB_NAMES := libjson2toon.$(SOVERSION).dylib libjson2toon.dylib
 else
   SHARED_LIB_REAL := $(BUILDDIR)/libjson2toon.so.$(VERSION)
   SHARED_LIB := $(BUILDDIR)/libjson2toon.so
+  SHLIB_NAMES := libjson2toon.so.$(VERSION) libjson2toon.so.$(SOVERSION) libjson2toon.so
 endif
 
 APP := $(BUILDDIR)/json2toon$(EXE_EXT)
@@ -154,7 +157,8 @@ ifeq ($(ENABLE_SHARED),1)
 endif
 
 .PHONY: help all build lib app test check test-leaks fuzz fuzz-standalone \
-        clean distclean install print-builddir
+        install install-lib install-app uninstall uninstall-lib uninstall-app \
+        clean distclean print-builddir
 .DEFAULT_GOAL := help
 
 help:
@@ -169,7 +173,11 @@ help:
 	@echo '  test-leaks    run the test suite under a leak checker'
 	@echo '  fuzz          build the libFuzzer target (needs an LLVM clang)'
 	@echo '  fuzz-standalone  build the portable replay driver (any toolchain)'
-	@echo '  install       copy built artifacts under PREFIX (default /usr/local)'
+	@echo '  install       install lib + CLI under PREFIX (default /usr/local)'
+	@echo '  install-lib   install only the library, header and .pc'
+	@echo '  install-app   install only the CLI'
+	@echo '  uninstall     remove everything install put under PREFIX'
+	@echo '  uninstall-lib / uninstall-app  remove only the lib / only the CLI'
 	@echo '  clean         remove the entire build tree (all targets/variants)'
 	@echo '  distclean     clean + remove ./configure output and legacy artifacts'
 	@echo '  print-builddir  print the resolved build directory for this config'
@@ -259,9 +267,8 @@ $(FUZZSTANDALONE): $(OBJDIR)/fuzz-standalone.o $(STATIC_LIB)
 fuzz-standalone: $(FUZZSTANDALONE)
 	@echo "built $(FUZZSTANDALONE)"
 
-# Runtime symlinks created next to the installed shared object. ELF gets the
-# conventional three names (real <- soname <- dev); macOS gets the dev link to
-# the major-versioned dylib; Windows (.dll) gets none.
+# Runtime symlinks beside the installed shared object: ELF wants the
+# conventional real <- soname <- dev chain, macOS just the dev link, Windows none.
 ifeq ($(SHLIB_EXT),dylib)
   INSTALL_SHLIB_LINKS = cd $(PREFIX)/lib && ln -sf libjson2toon.$(SOVERSION).dylib libjson2toon.dylib
 else ifeq ($(SHLIB_EXT),so)
@@ -270,9 +277,10 @@ else
   INSTALL_SHLIB_LINKS = :
 endif
 
-install: build
-	mkdir -p $(PREFIX)/bin $(PREFIX)/lib $(PREFIX)/include $(PREFIX)/lib/pkgconfig
-	cp $(APP) $(PREFIX)/bin/
+install: install-lib install-app
+
+install-lib: lib
+	mkdir -p $(PREFIX)/lib $(PREFIX)/include $(PREFIX)/lib/pkgconfig
 	cp $(STATIC_LIB) $(PREFIX)/lib/
 	cp include/json2toon.h $(PREFIX)/include/
 	[ -f json2toon.pc ] && cp json2toon.pc $(PREFIX)/lib/pkgconfig/ || true
@@ -280,6 +288,20 @@ ifeq ($(ENABLE_SHARED),1)
 	cp $(SHARED_LIB_REAL) $(PREFIX)/lib/
 	$(INSTALL_SHLIB_LINKS)
 endif
+
+install-app: app
+	mkdir -p $(PREFIX)/bin
+	cp $(APP) $(PREFIX)/bin/
+
+uninstall: uninstall-lib uninstall-app
+
+uninstall-lib:
+	rm -f $(PREFIX)/lib/libjson2toon.a $(PREFIX)/include/json2toon.h \
+	      $(PREFIX)/lib/pkgconfig/json2toon.pc \
+	      $(addprefix $(PREFIX)/lib/,$(SHLIB_NAMES))
+
+uninstall-app:
+	rm -f $(PREFIX)/bin/json2toon$(EXE_EXT)
 
 print-builddir:
 	@echo $(BUILDDIR)

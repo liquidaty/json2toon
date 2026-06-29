@@ -1,33 +1,26 @@
 /* json2toon - stdio / convenience layer.
  *
- * Codec-agnostic glue over the public push API (json2toon_* / toon2json_*):
- * a stdio FILE sink, fwrite(3)-shaped feed adapters, and whole-FILE / whole-
- * buffer one-shot converters. Everything here is built strictly on the public
- * push API, so the streaming guarantee (neither the whole input nor the whole
- * output ever resident) is preserved: input is pumped in fixed-size chunks and
- * output is delivered through the sink. No symbol here references an internal
- * type.
+ * Codec-agnostic glue over the public push API: a FILE sink, fwrite(3)-shaped
+ * feed adapters, and whole-FILE / whole-buffer one-shot converters. Built only
+ * on the push API, so the streaming guarantee holds (input pumped in fixed
+ * chunks, output via the sink); no internal type is referenced.
  *
- * The forward and reverse directions differ only in *which* push functions
- * they call. To avoid duplicating the driver logic twice -- and to avoid the
- * undefined behavior of calling json2toon_feed() through an incompatible
- * function-pointer type -- the typed entry points are reached through a small
- * vtable of correctly-typed one-line trampolines (codec_ops), and the drivers
- * are written once against that vtable.
+ * Forward and reverse differ only in which push functions they call, so the
+ * drivers are written once against a codec_ops vtable of correctly-typed
+ * trampolines -- which also avoids the UB of calling, say, json2toon_feed()
+ * through an incompatible function-pointer type.
  */
 #include "json2toon.h"
 
 #include <stdio.h>
 
-/* Chunk size for the FILE reader. Kept modest so the buffer lives safely on the
- * stack on every target, including emscripten's small default stack. */
+/* FILE-reader chunk; modest so the stack buffer is safe even on emscripten. */
 #define J2T_CONVERT_CHUNK 16384
 
 /* ------------------------------------------------------------------ vtable */
 
-/* Uniform void*-converter operations. Each trampoline just forwards to the
- * matching typed public function, so the cast lives inside a function of the
- * correct type and there is no function-pointer-cast UB. */
+/* Uniform void*-converter ops; each trampoline forwards to the typed function,
+ * keeping the cast inside a correctly-typed function (no fn-pointer-cast UB). */
 typedef struct {
   int    (*feed)(void *conv, const char *data, size_t len);
   int    (*finish)(void *conv);
@@ -52,9 +45,7 @@ static const codec_ops T2J_OPS = { t2j_feed_v, t2j_finish_v, t2j_eoff_v, t2j_des
 
 int json2toon_file_sink(const char *data, size_t len, void *file) {
   FILE *f = (FILE *)file;
-  /* Defensive/explicit: a zero-length chunk needs no write. (fwrite(_,1,0,_)
-   * also returns 0 == len, so this is equivalent, just clearer.) */
-  if (len == 0)
+  if (len == 0)                                  /* nothing to write */
     return 0;
   return fwrite(data, 1, len, f) == len ? 0 : -1;
 }
@@ -82,10 +73,9 @@ size_t toon2json_feed_fwrite(const void *ptr, size_t size, size_t nmemb, void *t
 
 /* ----------------------------------------------------------- whole-doc drivers */
 
-/* Common tail shared by both drivers: finish, flush the output (so a buffered
- * write failure becomes ERR_IO instead of being lost), capture the error offset
- * on failure, and destroy the converter. `rc` is the status going in (OK unless
- * the feed phase already failed). */
+/* Shared driver tail: finish, flush (so a buffered write failure surfaces as
+ * ERR_IO rather than being lost), capture the error offset, destroy. `rc` is OK
+ * unless the feed phase already failed. */
 static int finalize(void *conv, FILE *out, const codec_ops *ops, int rc,
                     size_t *error_offset) {
   if (rc == JSON2TOON_OK)

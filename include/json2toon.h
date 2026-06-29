@@ -20,9 +20,8 @@
 extern "C" {
 #endif
 
-/* Library version. JSON2TOON_VERSION is the single source of truth: the build
- * (configure -> json2toon.pc) and json2toon_version() both derive from it. The
- * numeric form lets a consumer gate on a minimum floor at compile time, e.g.
+/* Library version (single source of truth; configure and json2toon_version()
+ * both derive from it). The numeric form gates a minimum floor at compile time:
  *
  *   #if !defined(JSON2TOON_VERSION_NUMBER) || JSON2TOON_VERSION_NUMBER < 10100
  *   # error "json2toon >= 1.1.0 required (stdio convenience layer)"
@@ -36,12 +35,10 @@ extern "C" {
   (JSON2TOON_VERSION_MAJOR * 10000 + JSON2TOON_VERSION_MINOR * 100 +       \
    JSON2TOON_VERSION_PATCH)
 
-/* Public-symbol decoration. Centralizes the only compiler/platform divergence in
- * this header so call sites stay clean. The library is built with
- * JSON2TOON_BUILD defined (see the Makefile), which exports the annotated
- * symbols and -- together with -fvisibility=hidden -- keeps every other symbol
- * internal. Consumers need no define for static linking; consumers of the
- * Windows DLL define JSON2TOON_DLL to import. */
+/* Public-symbol decoration (centralizes the header's only platform divergence).
+ * The library builds with JSON2TOON_BUILD to export the annotated symbols
+ * (with -fvisibility=hidden hiding the rest). Static consumers need no define;
+ * Windows DLL consumers define JSON2TOON_DLL to import. */
 #if defined(_WIN32) || defined(__CYGWIN__)
 #  if defined(JSON2TOON_BUILD)
 #    define JSON2TOON_API __declspec(dllexport)
@@ -164,43 +161,34 @@ JSON2TOON_API const char *toon2json_strerror(int rc);
 /* ====================================================================== *
  *  stdio / convenience layer
  *
- *  Codec-agnostic glue built strictly on the push API above, so the streaming
- *  guarantee is preserved (input is pumped in fixed-size chunks; output is
- *  delivered through the sink). References no internal type; a single FILE sink
- *  serves both directions because both converters take a json2toon_sink.
+ *  Codec-agnostic glue on the push API; preserves the streaming guarantee. One
+ *  FILE sink serves both directions (both converters take a json2toon_sink).
  *
- *  FILE ownership: none of these functions open or close `in` / `out` — the
- *  caller owns both. The whole-document converters flush `out` on success, so a
- *  deferred (buffered) write failure is reported as JSON2TOON_ERR_IO rather than
- *  being lost; the caller is still responsible for fclose() and for checking it.
+ *  FILE ownership: these never open or close `in` / `out` (the caller owns
+ *  both). The whole-document converters flush `out` on success, so a buffered
+ *  write failure surfaces as JSON2TOON_ERR_IO; the caller still fclose()s.
  * ====================================================================== */
 
-/* A ready-made sink that writes each output chunk to a stdio FILE. Pass as the
- * `sink` argument to json2toon_new() / toon2json_new(), with `ctx` set to a
- * (valid, writable) FILE *. Returns 0 on success, non-zero on a short write
- * (which the converter surfaces as JSON2TOON_ERR_IO). */
+/* Sink that writes each output chunk to a stdio FILE. Pass as the `sink` to
+ * json2toon_new() / toon2json_new() with `ctx` a writable FILE *. Returns 0, or
+ * non-zero on a short write (surfaced by the converter as JSON2TOON_ERR_IO). */
 JSON2TOON_API int json2toon_file_sink(const char *data, size_t len, void *file);
 
 /* fwrite(3)-signature adapters: feed size*nmemb bytes at `ptr` into the
- * converter (`json2toon_t *` / `toon2json_t *`). Returns nmemb on success, or 0
- * once the converter is in an error state — a short count, which tells an
- * fwrite-style producer to stop. size==0 or nmemb==0 is a no-op returning nmemb;
- * on a size*nmemb overflow it returns 0. */
+ * converter (`json2toon_t *` / `toon2json_t *`). Returns nmemb, or 0 once the
+ * converter is in error -- a short count telling an fwrite-style producer to
+ * stop. size==0 or nmemb==0 is a no-op returning nmemb; overflow returns 0. */
 JSON2TOON_API size_t json2toon_feed_fwrite(const void *ptr, size_t size, size_t nmemb, void *j2t);
 JSON2TOON_API size_t toon2json_feed_fwrite(const void *ptr, size_t size, size_t nmemb, void *t2j);
 
-/* Convert all of `in` (read to EOF) to the other format, written to `out`.
- * `opts` may be NULL for defaults. On a negative return, *error_offset (if
- * non-NULL) receives the input byte offset of the error (as *_error_offset());
- * it is set to 0 for errors with no input position (e.g. allocation failure, or
- * a flush-time IO error after the document was already consumed). Returns
- * JSON2TOON_OK or a negative JSON2TOON_ERR_*.
+/* Convert all of `in` (to EOF) to the other format, written to `out`. `opts`
+ * may be NULL. Returns JSON2TOON_OK or a negative JSON2TOON_ERR_*; on error,
+ * *error_offset (if non-NULL) gets the input byte offset, or 0 for errors with
+ * no position (allocation, or a flush-time IO error after the input was read).
  *
- * Empty input is NOT special-cased; it takes each codec's natural meaning:
- * json2toon treats an empty document as a parse error (JSON2TOON_ERR_PARSE,
- * offset 0), whereas toon2json treats empty / whitespace-only input as the
- * empty object (JSON2TOON_OK, output "{}"). Callers wanting "produced nothing"
- * to mean success must handle that above this layer. */
+ * Empty input is not special-cased -- it takes each codec's natural meaning:
+ * json2toon -> parse error (offset 0); toon2json -> the empty object ("{}",
+ * JSON2TOON_OK). Callers wanting "produced nothing" == success handle it above. */
 JSON2TOON_API int json2toon_convert_file(FILE *in, FILE *out, const json2toon_options *opts, size_t *error_offset);
 JSON2TOON_API int toon2json_convert_file(FILE *in, FILE *out, const toon2json_options *opts, size_t *error_offset);
 

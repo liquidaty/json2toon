@@ -31,99 +31,68 @@ static int sbuf_sink(const char *data, size_t n, void *ctx) {
   return 0;
 }
 
-/* Convert in one shot. *out is a malloc'd NUL-terminated string (caller frees).
- * Returns the json2toon status code. */
+/* Direction vtable: forward and reverse drivers differ only in which push
+ * functions they call (void* converter handles let one driver serve both). */
+typedef struct {
+  int (*feed)(void *c, const char *d, size_t n);
+  int (*finish)(void *c);
+  void (*destroy)(void *c);
+} codec;
+static int  j2t_feed(void *c, const char *d, size_t n) { return json2toon_feed(c, d, n); }
+static int  j2t_fin(void *c) { return json2toon_finish(c); }
+static void j2t_del(void *c) { json2toon_delete(c); }
+static int  t2j_feed(void *c, const char *d, size_t n) { return toon2json_feed(c, d, n); }
+static int  t2j_fin(void *c) { return toon2json_finish(c); }
+static void t2j_del(void *c) { toon2json_delete(c); }
+static const codec FWD = { j2t_feed, j2t_fin, j2t_del };
+static const codec REV = { t2j_feed, t2j_fin, t2j_del };
+
+/* Drive a freshly created converter to completion: feed `in` whole (chunk==0)
+ * or in chunk-byte pieces, finish, destroy. *out gets a malloc'd NUL-terminated
+ * copy of the output (caller frees). Returns the status code. */
+static int drive(void *conv, const codec *c, sbuf *b, const char *in, size_t n,
+                 size_t chunk, char **out) {
+  int rc = JSON2TOON_OK;
+  size_t i;
+  if (!conv) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
+  if (chunk == 0)
+    rc = c->feed(conv, in, n);
+  else
+    for (i = 0; i < n && rc == JSON2TOON_OK; i += chunk)
+      rc = c->feed(conv, in + i, chunk < n - i ? chunk : n - i);
+  if (rc == JSON2TOON_OK)
+    rc = c->finish(conv);
+  c->destroy(conv);
+  if (!b->p) b->p = (char *)calloc(1, 1);
+  *out = b->p;
+  return rc;
+}
+
+/* JSON -> TOON, whole input and one byte at a time (to cross every boundary). */
 static int convert(const char *json, size_t n, unsigned indent, char **out) {
   sbuf b = {0, 0, 0, 0};
-  json2toon_options opt;
-  json2toon_t *j;
-  int rc;
-  memset(&opt, 0, sizeof opt);
-  opt.indent = indent;
-  j = json2toon_new(sbuf_sink, &b, &opt);
-  if (!j) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
-  rc = json2toon_feed(j, json, n);
-  if (rc == JSON2TOON_OK)
-    rc = json2toon_finish(j);
-  json2toon_delete(j);
-  if (!b.p) { b.p = (char *)calloc(1, 1); }
-  *out = b.p;
-  return rc;
+  json2toon_options o; memset(&o, 0, sizeof o); o.indent = indent;
+  return drive(json2toon_new(sbuf_sink, &b, &o), &FWD, &b, json, n, 0, out);
 }
-
-/* Convert feeding one byte at a time, to exercise every chunk boundary. */
-static int convert_streamed(const char *json, size_t n, unsigned indent,
-                            char **out) {
+static int convert_streamed(const char *json, size_t n, unsigned indent, char **out) {
   sbuf b = {0, 0, 0, 0};
-  json2toon_options opt;
-  json2toon_t *j;
-  int rc = JSON2TOON_OK;
-  size_t i;
-  memset(&opt, 0, sizeof opt);
-  opt.indent = indent;
-  j = json2toon_new(sbuf_sink, &b, &opt);
-  if (!j) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
-  for (i = 0; i < n && rc == JSON2TOON_OK; i++)
-    rc = json2toon_feed(j, json + i, 1);
-  if (rc == JSON2TOON_OK)
-    rc = json2toon_finish(j);
-  json2toon_delete(j);
-  if (!b.p) { b.p = (char *)calloc(1, 1); }
-  *out = b.p;
-  return rc;
+  json2toon_options o; memset(&o, 0, sizeof o); o.indent = indent;
+  return drive(json2toon_new(sbuf_sink, &b, &o), &FWD, &b, json, n, 1, out);
 }
 
-/* Reverse: convert TOON -> JSON in one shot. */
+/* TOON -> JSON: strict bulk, lenient bulk, and one-byte-streamed. */
 static int convert_rev(const char *toon, size_t n, char **out) {
   sbuf b = {0, 0, 0, 0};
-  toon2json_t *t;
-  int rc;
-  t = toon2json_new(sbuf_sink, &b, NULL);
-  if (!t) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
-  rc = toon2json_feed(t, toon, n);
-  if (rc == JSON2TOON_OK)
-    rc = toon2json_finish(t);
-  toon2json_delete(t);
-  if (!b.p) { b.p = (char *)calloc(1, 1); }
-  *out = b.p;
-  return rc;
+  return drive(toon2json_new(sbuf_sink, &b, NULL), &REV, &b, toon, n, 0, out);
 }
-
-/* Reverse in lenient mode: any unquoted value is accepted as a bare string. */
 static int convert_rev_lenient(const char *toon, size_t n, char **out) {
   sbuf b = {0, 0, 0, 0};
-  toon2json_options opt;
-  toon2json_t *t;
-  int rc;
-  memset(&opt, 0, sizeof opt);
-  opt.lenient = 1;
-  t = toon2json_new(sbuf_sink, &b, &opt);
-  if (!t) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
-  rc = toon2json_feed(t, toon, n);
-  if (rc == JSON2TOON_OK)
-    rc = toon2json_finish(t);
-  toon2json_delete(t);
-  if (!b.p) { b.p = (char *)calloc(1, 1); }
-  *out = b.p;
-  return rc;
+  toon2json_options o; memset(&o, 0, sizeof o); o.lenient = 1;
+  return drive(toon2json_new(sbuf_sink, &b, &o), &REV, &b, toon, n, 0, out);
 }
-
-/* Reverse: convert TOON -> JSON feeding one byte at a time. */
 static int convert_rev_streamed(const char *toon, size_t n, char **out) {
   sbuf b = {0, 0, 0, 0};
-  toon2json_t *t;
-  int rc = JSON2TOON_OK;
-  size_t i;
-  t = toon2json_new(sbuf_sink, &b, NULL);
-  if (!t) { *out = NULL; return JSON2TOON_ERR_MEMORY; }
-  for (i = 0; i < n && rc == JSON2TOON_OK; i++)
-    rc = toon2json_feed(t, toon + i, 1);
-  if (rc == JSON2TOON_OK)
-    rc = toon2json_finish(t);
-  toon2json_delete(t);
-  if (!b.p) { b.p = (char *)calloc(1, 1); }
-  *out = b.p;
-  return rc;
+  return drive(toon2json_new(sbuf_sink, &b, NULL), &REV, &b, toon, n, 1, out);
 }
 
 /* ----------------------------------------------------------------- harness */
@@ -452,29 +421,17 @@ static void run_convenience_tests(void) {
 
 static void check_fwd_limit(const char *name, const char *json,
                             const json2toon_options *opt, int want) {
-  sbuf b = {0, 0, 0, 0};
-  json2toon_t *j = json2toon_new(sbuf_sink, &b, opt);
-  int rc;
-  if (!j) { g_fail++; printf("FAIL %s (new)\n", name); return; }
-  rc = json2toon_feed(j, json, strlen(json));
-  if (rc == JSON2TOON_OK)
-    rc = json2toon_finish(j);
-  json2toon_delete(j);
-  free(b.p);
+  sbuf b = {0, 0, 0, 0}; char *out = NULL;
+  int rc = drive(json2toon_new(sbuf_sink, &b, opt), &FWD, &b, json, strlen(json), 0, &out);
+  free(out);
   cv_bool(name, rc == want);
 }
 
 static void check_rev_limit(const char *name, const char *toon,
                             const toon2json_options *opt, int want) {
-  sbuf b = {0, 0, 0, 0};
-  toon2json_t *t = toon2json_new(sbuf_sink, &b, opt);
-  int rc;
-  if (!t) { g_fail++; printf("FAIL %s (new)\n", name); return; }
-  rc = toon2json_feed(t, toon, strlen(toon));
-  if (rc == JSON2TOON_OK)
-    rc = toon2json_finish(t);
-  toon2json_delete(t);
-  free(b.p);
+  sbuf b = {0, 0, 0, 0}; char *out = NULL;
+  int rc = drive(toon2json_new(sbuf_sink, &b, opt), &REV, &b, toon, strlen(toon), 0, &out);
+  free(out);
   cv_bool(name, rc == want);
 }
 

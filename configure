@@ -77,9 +77,8 @@ esac
 # there). Emitted to the config file as EXE_EXT.
 EXE_EXT=""
 
-# Library version, read once from the public header (single source of truth for
-# json2toon_version(), the .pc file, and the shared-object ABI name below).
-# soversion is the major component and is the soname / install_name ABI tag.
+# Library version, read once from the public header (single source of truth).
+# soversion (the major component) is the soname / install_name ABI tag.
 version=$(sed -n 's/.*JSON2TOON_VERSION "\([^"]*\)".*/\1/p' include/json2toon.h | head -1)
 version="${version:-0.0.0}"
 soversion="${version%%.*}"

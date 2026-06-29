@@ -1,15 +1,12 @@
 /* json2toon - fuzz harness.
  *
- * One libFuzzer entry point drives BOTH converters over arbitrary bytes, fed in
- * input-derived chunk sizes so chunk-boundary handling is exercised (the same
- * property the one-byte-streamed unit tests check, but over random data). The
- * output sink discards everything; we are fuzzing the parsers, not the writers.
+ * One libFuzzer entry point drives BOTH converters over arbitrary bytes in
+ * input-derived chunk sizes (to exercise chunk boundaries); the sink discards
+ * output -- we fuzz the parsers, not the writers.
  *
- * Two build modes (see the Makefile):
- *   make fuzz             libFuzzer build (clang, -fsanitize=fuzzer,address,...)
- *   make fuzz-standalone  portable driver: replays files named on argv (or
- *                         stdin) through the same entry point once each, so the
- *                         harness can be smoke-built and run with plain gcc.
+ * Build (see the Makefile): `make fuzz` (libFuzzer/clang), or `make
+ * fuzz-standalone` for a portable driver that replays argv files / stdin once
+ * each through the same entry point (smoke-buildable with any compiler).
  */
 #include "json2toon.h"
 
@@ -22,45 +19,46 @@ static int null_sink(const char *data, size_t len, void *ctx) {
   return 0;
 }
 
-/* Feed [data,len) to a freshly created converter of the given direction in
- * chunks of 1..17 bytes (size derived from the data), then finish + destroy.
- * `dir` 0 == json2toon, non-zero == toon2json. */
-static void run_one(int dir, const uint8_t *data, size_t len) {
+/* Per-direction vtable so one driver fuzzes both converters. */
+typedef struct {
+  void *(*create)(void);
+  int   (*feed)(void *c, const char *d, size_t n);
+  int   (*finish)(void *c);
+  void  (*destroy)(void *c);
+} codec;
+static void *j_new(void) { return json2toon_new(null_sink, NULL, NULL); }
+static int   j_feed(void *c, const char *d, size_t n) { return json2toon_feed(c, d, n); }
+static int   j_fin(void *c) { return json2toon_finish(c); }
+static void  j_del(void *c) { json2toon_delete(c); }
+static void *t_new(void) { return toon2json_new(null_sink, NULL, NULL); }
+static int   t_feed(void *c, const char *d, size_t n) { return toon2json_feed(c, d, n); }
+static int   t_fin(void *c) { return toon2json_finish(c); }
+static void  t_del(void *c) { toon2json_delete(c); }
+static const codec J2T = { j_new, j_feed, j_fin, j_del };
+static const codec T2J = { t_new, t_feed, t_fin, t_del };
+
+/* Feed [data,len) through one converter in input-derived 1..17 byte chunks,
+ * then finish + destroy. */
+static void run_one(const codec *c, const uint8_t *data, size_t len) {
+  void *conv = c->create();
   size_t off = 0;
-  if (dir == 0) {
-    json2toon_t *j = json2toon_new(null_sink, NULL, NULL);
-    if (!j)
-      return;
-    while (off < len) {
-      size_t chunk = (size_t)(data[off] % 17) + 1;
-      if (chunk > len - off)
-        chunk = len - off;
-      if (json2toon_feed(j, (const char *)data + off, chunk) != JSON2TOON_OK)
-        break;
-      off += chunk;
-    }
-    json2toon_finish(j);
-    json2toon_delete(j);
-  } else {
-    toon2json_t *t = toon2json_new(null_sink, NULL, NULL);
-    if (!t)
-      return;
-    while (off < len) {
-      size_t chunk = (size_t)(data[off] % 17) + 1;
-      if (chunk > len - off)
-        chunk = len - off;
-      if (toon2json_feed(t, (const char *)data + off, chunk) != JSON2TOON_OK)
-        break;
-      off += chunk;
-    }
-    toon2json_finish(t);
-    toon2json_delete(t);
+  if (!conv)
+    return;
+  while (off < len) {
+    size_t chunk = (size_t)(data[off] % 17) + 1;
+    if (chunk > len - off)
+      chunk = len - off;
+    if (c->feed(conv, (const char *)data + off, chunk) != JSON2TOON_OK)
+      break;
+    off += chunk;
   }
+  c->finish(conv);
+  c->destroy(conv);
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t len) {
-  run_one(0, data, len);   /* as JSON  */
-  run_one(1, data, len);   /* as TOON  */
+  run_one(&J2T, data, len);   /* as JSON */
+  run_one(&T2J, data, len);   /* as TOON */
   return 0;
 }
 
