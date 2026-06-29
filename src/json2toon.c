@@ -13,7 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define J2T_VERSION "1.1.0"
 #define DELIM ','
 
 /* Parser states. */
@@ -583,7 +582,6 @@ json2toon *json2toon_new(json2toon_sink sink, void *ctx,
     j->opt.max_array_bytes = opts->max_array_bytes;
   }
 
-  j2t_simd_init();
   j2t_out_init(&j->out, sink, ctx, j->opt.indent);
   j->state = ST_VALUE;
   j->err = JSON2TOON_OK;
@@ -616,4 +614,4 @@ const char *json2toon_strerror(int rc) {
   }
 }
 
-const char *json2toon_version(void) { return J2T_VERSION; }
+const char *json2toon_version(void) { return JSON2TOON_VERSION; }

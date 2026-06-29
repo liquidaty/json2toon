@@ -120,10 +120,13 @@ ENABLE_SHARED = $enable_shared
 DEBUG_DEFAULT = $DEBUG_DEFAULT
 EOF
 
-# pkg-config file.
+# pkg-config file. Read the version from the public header so the .pc never
+# drifts from JSON2TOON_VERSION / json2toon_version() (single source of truth).
 if [ -f json2toon.pc.in ]; then
+  version=$(sed -n 's/.*JSON2TOON_VERSION "\([^"]*\)".*/\1/p' include/json2toon.h | head -1)
+  version="${version:-0.0.0}"
   sed -e "s#@PREFIX@#$prefix#g" \
-      -e "s#@VERSION@#1.0.0#g" json2toon.pc.in > json2toon.pc
+      -e "s#@VERSION@#$version#g" json2toon.pc.in > json2toon.pc
 fi
 
 echo "configure: writing $CONFIGFILE"

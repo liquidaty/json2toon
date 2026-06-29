@@ -52,10 +52,11 @@ int j2t_looks_like_number(const char *s, size_t n);
 
 /* --------------------------------------------------------------- scanners */
 
-/* Runtime-selected SIMD/scalar scanners. Initialised once on first use. */
+/* SIMD/scalar scanners, selected at compile time and bound at static-init time
+ * (see src/simd.c). Read-only after startup, so converter creation needs no
+ * init handshake and is safe to use concurrently from multiple threads. */
 typedef const char *(*j2t_scan_fn)(const char *p, const char *end);
 
-void j2t_simd_init(void);
 /* Return first byte in [p,end) that is NOT JSON insignificant whitespace. */
 extern j2t_scan_fn j2t_skip_ws;
 /* Return first byte in [p,end) that ends a "clean" string run: a '"', a '\\',

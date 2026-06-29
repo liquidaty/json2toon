@@ -982,7 +982,6 @@ toon2json *toon2json_new(json2toon_sink sink, void *ctx,
     t->opt.lenient = opts->lenient;
   }
 
-  j2t_simd_init();
   /* indent width is irrelevant for JSON output; pass 0 */
   j2t_out_init(&t->out, sink, ctx, 0);
   t->state = ST_START;

@@ -198,3 +198,25 @@ jobs:
           testbin="$(emmake make print-builddir | tail -1)/test"
           emmake make "$testbin"
           node "$testbin"
+
+  # ----------------------------------------------------------- fuzzing
+  # Short libFuzzer session driving BOTH converter directions (clang +
+  # libFuzzer), plus a build of the portable standalone replay driver. The
+  # macOS build host can't fuzz (Apple clang lacks libFuzzer), so this is the
+  # canonical fuzz coverage.
+  fuzz:
+    name: linux (fuzz, clang+libFuzzer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: CC=clang ./configure
+      - name: Build the portable replay driver
+        run: make fuzz-standalone
+      - name: Build the libFuzzer target
+        run: make fuzz FUZZ_CC=clang
+      - name: Fuzz both directions
+        run: |
+          bin="$(make print-builddir | tail -1)/fuzz"
+          "$bin" -max_total_time=60 -print_final_stats=1

@@ -20,6 +20,22 @@
 extern "C" {
 #endif
 
+/* Library version. JSON2TOON_VERSION is the single source of truth: the build
+ * (configure -> json2toon.pc) and json2toon_version() both derive from it. The
+ * numeric form lets a consumer gate on a minimum floor at compile time, e.g.
+ *
+ *   #if !defined(JSON2TOON_VERSION_NUMBER) || JSON2TOON_VERSION_NUMBER < 10100
+ *   # error "json2toon >= 1.1.0 required (stdio convenience layer)"
+ *   #endif
+ */
+#define JSON2TOON_VERSION_MAJOR 1
+#define JSON2TOON_VERSION_MINOR 1
+#define JSON2TOON_VERSION_PATCH 0
+#define JSON2TOON_VERSION "1.1.0"
+#define JSON2TOON_VERSION_NUMBER                                          \
+  (JSON2TOON_VERSION_MAJOR * 10000 + JSON2TOON_VERSION_MINOR * 100 +       \
+   JSON2TOON_VERSION_PATCH)
+
 /* Status / error codes. JSON2TOON_OK is zero; all errors are negative. */
 enum {
   JSON2TOON_OK = 0,

@@ -122,8 +122,8 @@ ifeq ($(ENABLE_SHARED),1)
   LIBS += $(SHARED_LIB)
 endif
 
-.PHONY: help all build lib app test check test-leaks clean distclean install \
-        print-builddir
+.PHONY: help all build lib app test check test-leaks fuzz fuzz-standalone \
+        clean distclean install print-builddir
 .DEFAULT_GOAL := help
 
 help:
@@ -136,6 +136,8 @@ help:
 	@echo '  test          build and run the unit/round-trip test suite'
 	@echo '  check         alias for test'
 	@echo '  test-leaks    run the test suite under a leak checker'
+	@echo '  fuzz          build the libFuzzer target (needs an LLVM clang)'
+	@echo '  fuzz-standalone  build the portable replay driver (any toolchain)'
 	@echo '  install       copy built artifacts under PREFIX (default /usr/local)'
 	@echo '  clean         remove the entire build tree (all targets/variants)'
 	@echo '  distclean     clean + remove ./configure output and legacy artifacts'
@@ -189,6 +191,35 @@ test-leaks: $(TESTBIN)
 	  echo "leaks(1) not found; running suite directly"; \
 	  $(TESTBIN); \
 	fi
+
+# ------------------------------------------------------------------- fuzzing
+# libFuzzer build. Compiles the library sources together with the harness in one
+# clang invocation so coverage/sanitizer instrumentation reaches the parsers.
+# Needs an LLVM clang with libFuzzer (Apple clang lacks it -- use the Linux CI
+# or a real clang). Override the compiler with FUZZ_CC=...
+FUZZ_CC ?= clang
+FUZZBIN := $(BUILDDIR)/fuzz$(EXE_EXT)
+FUZZSTANDALONE := $(BUILDDIR)/fuzz-standalone$(EXE_EXT)
+
+$(FUZZBIN): $(LIB_SRCS) tests/fuzz.c | $(OBJDIR)
+	$(FUZZ_CC) $(BASE_CFLAGS) -g -O1 -fno-omit-frame-pointer \
+	  -fsanitize=fuzzer,address,undefined -o $@ $(LIB_SRCS) tests/fuzz.c
+
+fuzz: $(FUZZBIN)
+	@echo "built $(FUZZBIN)"
+	@echo "run e.g.: $(FUZZBIN) -max_total_time=60 [corpus_dir]"
+
+# Portable replay driver: runs each input file (or stdin) through the harness
+# once. Buildable/runnable with any toolchain (no libFuzzer) -- used for CI
+# smoke coverage and for replaying a crash file found by `make fuzz`.
+$(OBJDIR)/fuzz-standalone.o: tests/fuzz.c | $(OBJDIR)
+	$(CC) $(ALL_CFLAGS) -DJ2T_FUZZ_STANDALONE -c $< -o $@
+
+$(FUZZSTANDALONE): $(OBJDIR)/fuzz-standalone.o $(STATIC_LIB)
+	$(CC) $(ALL_LDFLAGS) -o $@ $(OBJDIR)/fuzz-standalone.o $(STATIC_LIB)
+
+fuzz-standalone: $(FUZZSTANDALONE)
+	@echo "built $(FUZZSTANDALONE)"
 
 install: build
 	mkdir -p $(PREFIX)/bin $(PREFIX)/lib $(PREFIX)/include $(PREFIX)/lib/pkgconfig
