@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define T2J_DEFAULT_DEPTH 256
+#define T2J_DEFAULT_DEPTH 128
 #define T2J_DEFAULT_LINE_BYTES (64u * 1024u * 1024u)
 #define U_UNSET ((unsigned)-1)
 

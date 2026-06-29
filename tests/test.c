@@ -238,6 +238,171 @@ static void check_roundtrip(const char *name, const char *json) {
   free(back);
 }
 
+/* ------------------------------------------ bounded-memory array options */
+
+/* Defined further below; forward-declared so this section can use them. */
+static void cv_bool(const char *name, int ok);
+static void check_fwd_limit(const char *name, const char *json,
+                            const json2toon_options *opt, int want);
+
+/* Forward conversion with explicit options, in both bulk and 1-byte-streamed
+ * modes; asserts both succeed and equal `expect`. Used to exercise the spill /
+ * temp-file paths and order-insensitive tabular detection. */
+static void check_opts_ok(const char *name, const char *json,
+                          const json2toon_options *o, const char *expect) {
+  sbuf b1 = {0, 0, 0, 0}, b2 = {0, 0, 0, 0};
+  char *o1 = NULL, *o2 = NULL;
+  size_t n = strlen(json);
+  int r1 = drive(json2toon_new(sbuf_sink, &b1, o), &FWD, &b1, json, n, 0, &o1);
+  int r2 = drive(json2toon_new(sbuf_sink, &b2, o), &FWD, &b2, json, n, 1, &o2);
+  int ok = r1 == JSON2TOON_OK && r2 == JSON2TOON_OK && o1 && o2 &&
+           strcmp(o1, expect) == 0 && strcmp(o2, expect) == 0;
+  if (!ok) {
+    g_fail++;
+    printf("FAIL %s\n  expected: %s\n  bulk(%d): %s\n  strm(%d): %s\n", name,
+           expect, r1, o1 ? o1 : "(null)", r2, o2 ? o2 : "(null)");
+  } else {
+    g_pass++;
+  }
+  free(o1);
+  free(o2);
+}
+
+/* The output must not depend on lookahead_buffer_size: a large (RAM-only)
+ * window and a tiny (spilling) one must produce byte-identical TOON. The small
+ * run also streams a byte at a time, crossing the spill boundary repeatedly. */
+static void check_determinism(const char *name, const char *json) {
+  json2toon_options big, small;
+  sbuf bb = {0, 0, 0, 0}, bs = {0, 0, 0, 0};
+  char *ob = NULL, *os = NULL;
+  size_t n = strlen(json);
+  int rb, rs;
+  memset(&big, 0, sizeof big);
+  memset(&small, 0, sizeof small);
+  big.lookahead_buffer_size = 1u << 20;     /* all in RAM */
+  small.lookahead_buffer_size = 8;          /* forces spill to a temp file */
+  rb = drive(json2toon_new(sbuf_sink, &bb, &big), &FWD, &bb, json, n, 0, &ob);
+  rs = drive(json2toon_new(sbuf_sink, &bs, &small), &FWD, &bs, json, n, 1, &os);
+  cv_bool(name, rb == JSON2TOON_OK && rs == JSON2TOON_OK && ob && os &&
+                    strcmp(ob, os) == 0);
+  free(ob);
+  free(os);
+}
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/stat.h>
+static char *dupstr(const char *s) {
+  size_t n = strlen(s) + 1;
+  char *p = (char *)malloc(n);
+  if (p) memcpy(p, s, n);
+  return p;
+}
+static int g_tmp_calls = 0;
+static char g_tmp_last[256];
+static char *test_tmpname(const char *prefix) {
+  (void)prefix;
+  snprintf(g_tmp_last, sizeof g_tmp_last, "/tmp/j2t_test_spill_%d.tmp",
+           g_tmp_calls++);
+  return dupstr(g_tmp_last);
+}
+static char *unwritable_tmpname(const char *prefix) {
+  (void)prefix;
+  return dupstr("/json2toon_no_such_dir/spill.tmp");
+}
+#endif
+
+static void run_array_store_tests(void) {
+  json2toon_options o;
+
+  /* Determinism across the spill boundary for every array form. */
+  check_determinism("spill-inline",
+                    "{\"tags\":[\"alpha\",\"beta\",\"gamma\",\"delta\"]}");
+  check_determinism("spill-tabular",
+                    "[{\"id\":1,\"name\":\"Alice\"},{\"id\":2,\"name\":\"Bob\"}]");
+  check_determinism("spill-list", "[1,{\"a\":1},\"a-fairly-long-scalar\"]");
+  check_determinism("spill-nested",
+                    "[[1,2,3,4,5,6],[7,8,9,10,11,12],[13,14,15,16,17,18]]");
+
+  /* tmpfile() fallback (NULL hook) with a tiny window: still succeeds. */
+  memset(&o, 0, sizeof o);
+  o.lookahead_buffer_size = 4;
+  check_opts_ok("spill-tmpfile-fallback", "[1,2,3,4,5,6,7,8,9,10]", &o,
+                "[10]: 1,2,3,4,5,6,7,8,9,10\n");
+
+  /* Order-insensitive tabular (TOON spec §9.3: same key SET, order may vary). */
+  check_ok("tabular-reordered-keys", "[{\"a\":1,\"b\":2},{\"b\":4,\"a\":3}]",
+           "[2]{a,b}:\n  1,2\n  3,4\n");
+  /* Reordered keys round-trip to the canonical (template-order) JSON. */
+  {
+    const char *src = "[{\"a\":1,\"b\":2},{\"b\":4,\"a\":3}]";
+    char *toon = NULL, *back = NULL;
+    int rc = convert(src, strlen(src), 2, &toon);
+    if (rc == JSON2TOON_OK)
+      rc = convert_rev(toon, strlen(toon), &back);
+    cv_bool("tabular-reordered-roundtrip",
+            rc == JSON2TOON_OK && back &&
+                strcmp(back, "[{\"a\":1,\"b\":2},{\"a\":3,\"b\":4}]") == 0);
+    free(toon);
+    free(back);
+  }
+
+  /* Set inequality / duplicate keys decline tabular and fall back to a list. */
+  check_ok("not-tabular-extra-key", "[{\"a\":1},{\"a\":1,\"b\":2}]",
+           "[2]:\n  - a: 1\n  - a: 1\n    b: 2\n");
+  check_ok("not-tabular-missing-key", "[{\"a\":1,\"b\":2},{\"a\":3}]",
+           "[2]:\n  - a: 1\n    b: 2\n  - a: 3\n");
+  check_ok("not-tabular-dup-key", "[{\"a\":1,\"a\":2}]",
+           "[1]:\n  - a: 1\n    a: 2\n");
+
+  /* Edge sweep: empty objects/arrays as list items. */
+  check_ok("list-empty-object-item", "[{}]", "[1]:\n  -\n");
+  check_ok("list-empty-array-item", "[[]]", "[1]:\n  - []\n");
+  check_ok("list-two-empty-objects", "[{},{}]", "[2]:\n  -\n  -\n");
+
+  /* Array nesting past max_depth -> ERR_DEPTH (now bounded like objects). */
+  memset(&o, 0, sizeof o);
+  o.max_depth = 3;
+  check_fwd_limit("limit-fwd-array-depth", "[[[[1]]]]", &o,
+                  JSON2TOON_ERR_DEPTH);
+  memset(&o, 0, sizeof o);
+  o.max_depth = 64;
+  check_fwd_limit("limit-fwd-array-depth-ok", "[[[[1]]]]", &o, JSON2TOON_OK);
+
+#if defined(__unix__) || defined(__APPLE__)
+  /* get_temp_filename hook: it is called for a spilling array, and the temp
+   * file it named is removed by the time conversion completes. */
+  {
+    char *out = NULL;
+    struct stat st;
+    sbuf b = {0, 0, 0, 0};
+    int rc;
+    memset(&o, 0, sizeof o);
+    o.lookahead_buffer_size = 4;
+    o.get_temp_filename = test_tmpname;
+    g_tmp_calls = 0;
+    rc = drive(json2toon_new(sbuf_sink, &b, &o), &FWD, &b,
+               "[1,2,3,4,5,6,7,8,9,10]", 22, 0, &out);
+    cv_bool("spill-hook-called", rc == JSON2TOON_OK && g_tmp_calls > 0);
+    cv_bool("spill-hook-file-removed", stat(g_tmp_last, &st) != 0);
+    free(out);
+  }
+
+  /* get_temp_filename pointing at an unwritable location -> ERR_IO. */
+  {
+    char *out = NULL;
+    sbuf b = {0, 0, 0, 0};
+    int rc;
+    memset(&o, 0, sizeof o);
+    o.lookahead_buffer_size = 4;
+    o.get_temp_filename = unwritable_tmpname;
+    rc = drive(json2toon_new(sbuf_sink, &b, &o), &FWD, &b,
+               "[1,2,3,4,5,6,7,8,9,10]", 22, 0, &out);
+    cv_bool("spill-io-error", rc == JSON2TOON_ERR_IO);
+    free(out);
+  }
+#endif
+}
+
 /* --------------------------------------------- stdio / convenience layer */
 
 /* Read all of `f` (rewound to the start) into a malloc'd NUL-terminated
@@ -442,8 +607,8 @@ static void run_limit_tests(void) {
   toon2json_options ro;
 
   /* forward: object nesting deeper than max_depth -> ERR_DEPTH; the same input
-   * within a generous limit converts cleanly (control). (The depth guard counts
-   * open objects; deeply nested arrays are bounded by max_array_bytes instead.) */
+   * within a generous limit converts cleanly (control). Array nesting is bounded
+   * the same way now (see limit-fwd-array-depth in run_array_store_tests). */
   memset(&fo, 0, sizeof fo);
   fo.max_depth = 2;
   check_fwd_limit("limit-fwd-depth", "{\"a\":{\"b\":{\"c\":{\"d\":1}}}}", &fo,
@@ -680,6 +845,7 @@ int main(void) {
                   "[{\"status\":\"active\",\"details\":"
                   "{\"level\":\"high\",\"count\":5}}]");
 
+  run_array_store_tests();
   run_convenience_tests();
   run_limit_tests();
 

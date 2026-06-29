@@ -50,6 +50,9 @@ void j2t_emit_quoted(j2t_out *o, const char *s, size_t n);
 /* True if [s,n) matches the JSON number grammar exactly. */
 int j2t_looks_like_number(const char *s, size_t n);
 
+/* Emit a non-negative count as decimal (the "N" in a TOON "[N]" header). */
+void j2t_emit_count(j2t_out *o, size_t n);
+
 /* --------------------------------------------------------------- scanners */
 
 /* SIMD/scalar scanners, selected at compile time and bound at static-init time
@@ -64,44 +67,75 @@ extern j2t_scan_fn j2t_skip_ws;
 extern j2t_scan_fn j2t_scan_string;
 const char *j2t_simd_backend(void);
 
-/* -------------------------------------------------------------------- DOM */
+/* ------------------------------------------------------- 64-bit file offsets */
 
-/* In-memory value tree, used to encode arrays (which require their element
- * count up front and so cannot be emitted without buffering). */
-typedef enum {
-  J2T_NULL, J2T_BOOL, J2T_NUM, J2T_STR, J2T_ARR, J2T_OBJ
-} j2t_ntype;
+/* Spilled arrays can exceed 2 GiB, so seeks need 64-bit offsets, not fseek's
+ * `long`. (store.c defines _FILE_OFFSET_BITS so fseeko is 64-bit on 32-bit POSIX.) */
+#if defined(_WIN32)
+#  define J2T_FSEEK(fp, off) (_fseeki64((fp), (long long)(off), SEEK_SET))
+#  define J2T_FTELL(fp)      ((int64_t)_ftelli64(fp))
+#elif defined(__unix__) || defined(__APPLE__)
+#  define J2T_FSEEK(fp, off) (fseeko((fp), (off_t)(off), SEEK_SET))
+#  define J2T_FTELL(fp)      ((int64_t)ftello(fp))
+#else
+#  define J2T_FSEEK(fp, off) (fseek((fp), (long)(off), SEEK_SET))
+#  define J2T_FTELL(fp)      ((int64_t)ftell(fp))
+#endif
 
-typedef struct j2t_node j2t_node;
-struct j2t_node {
-  j2t_ntype t;
-  union {
-    int b;                                   /* J2T_BOOL */
-    struct { char *p; size_t n; } s;         /* J2T_STR (decoded) / J2T_NUM (raw) */
-    struct { j2t_node **v; size_t n; } arr;  /* J2T_ARR */
-    struct { char **k; size_t *klen; j2t_node **v; size_t n; } obj; /* J2T_OBJ */
-  } u;
-};
+/* ------------------------------------------------------------- backing store */
 
-/* Bump-allocating arena; freed in one shot after each array is emitted. */
-typedef struct j2t_arena j2t_arena;
-j2t_arena *j2t_arena_new(void);
-void *j2t_arena_alloc(j2t_arena *a, size_t n);
-void j2t_arena_free(j2t_arena *a);
+/* Append-then-read store for one buffered array's raw bytes. Bytes live in
+ * `ram` up to `threshold`; the overflow spills to a temp file so peak RAM stays
+ * bounded regardless of array length. `ram` is reused across stored arrays. */
+typedef struct {
+  char *ram;                 /* resident bytes (pre-spill) / reusable scratch */
+  size_t ram_len;            /* bytes held in ram (only meaningful pre-spill) */
+  size_t ram_cap;
+  size_t threshold;          /* spill once a store would exceed this many bytes */
+  int spilled;               /* non-zero once bytes have moved to fp */
+  FILE *fp;                  /* spill file (NULL until spilled) */
+  char *tmpname;             /* get_temp_filename() result; NULL for tmpfile() */
+  uint64_t total;            /* total bytes appended */
+  char *(*get_temp_filename)(const char *prefix);
+  int err;                   /* sticky JSON2TOON_ERR_MEMORY / _IO, or OK */
+} j2t_store;
 
-/* Parse a complete in-memory JSON document [buf,len) into a node tree.
- * Returns NULL and sets *errpos on malformed input or OOM (*oom set). */
-j2t_node *j2t_dom_parse(j2t_arena *a, const char *buf, size_t len,
-                        size_t *errpos, int *oom);
+void j2t_store_init(j2t_store *s, size_t threshold,
+                    char *(*get_temp_filename)(const char *prefix));
+/* Append n bytes; returns JSON2TOON_OK or a sticky error (also left in s->err). */
+int j2t_store_append(j2t_store *s, const char *p, size_t n);
+/* Bytes appended so far (for the max_array_bytes check). */
+uint64_t j2t_store_size(const j2t_store *s);
+/* Close+remove any temp file and ready the store for the next array (keeps ram). */
+void j2t_store_reset(j2t_store *s);
+/* Reset, then release ram. */
+void j2t_store_free(j2t_store *s);
 
-/* Encode an array node as TOON. `level` is the indentation level of the array
- * header line; `keytext`/`keylen` is the already-quoted key to place before the
- * '[' (empty for a root array). The caller has NOT yet emitted indentation. */
-void j2t_encode_array(j2t_out *o, const j2t_node *arr, unsigned level,
-                      const char *keytext, size_t keylen);
+/* Sequential reader with seek over a store, sourcing from ram or the spill
+ * file transparently. */
+typedef struct {
+  j2t_store *s;
+  uint64_t pos;              /* logical read position in [0, total) */
+  char buf[4096];            /* file read window (spilled stores only) */
+  uint64_t buf_off;          /* logical offset of buf[0] */
+  size_t buf_len;            /* valid bytes in buf */
+} j2t_reader;
 
-/* Encode an object's members at the given level (used for objects nested
- * inside arrays). */
-void j2t_encode_object_members(j2t_out *o, const j2t_node *obj, unsigned level);
+void j2t_reader_init(j2t_reader *r, j2t_store *s);
+void j2t_reader_seek(j2t_reader *r, uint64_t off);
+uint64_t j2t_reader_tell(const j2t_reader *r);
+int j2t_reader_getc(j2t_reader *r);   /* byte at pos, advance; -1 at end/error */
+int j2t_reader_peek(j2t_reader *r);   /* byte at pos, no advance; -1 at end/error */
+size_t j2t_reader_read(j2t_reader *r, char *dst, size_t n);  /* bulk; advances */
+
+/* ----------------------------------------------------------- array encoder */
+
+/* Encode the array filling `s` (a complete "[...]") as TOON. `level` is the
+ * header line's indent level; `key`/`keylen` is the decoded key before '[' (NULL
+ * for a root array); `max_depth` bounds nesting (ERR_DEPTH past it). On a parse
+ * or depth error, *errpos gets the array-relative byte offset. */
+int j2t_encode_captured(j2t_out *o, j2t_store *s, unsigned level,
+                        const char *key, size_t keylen,
+                        unsigned max_depth, uint64_t *errpos);
 
 #endif /* JSON2TOON_INTERNAL_H */

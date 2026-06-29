@@ -105,6 +105,21 @@ int j2t_looks_like_number(const char *s, size_t n) {
   return i == n;
 }
 
+/* Emit a non-negative count as decimal (the "N" in a TOON "[N]" header). */
+void j2t_emit_count(j2t_out *o, size_t n) {
+  char b[24];
+  int i = (int)sizeof b;
+  if (n == 0) {
+    j2t_putc(o, '0');
+    return;
+  }
+  while (n) {
+    b[--i] = (char)('0' + (n % 10));
+    n /= 10;
+  }
+  j2t_write(o, b + i, (size_t)((int)sizeof b - i));
+}
+
 /* ------------------------------------------------------------ quoting test */
 
 static int eq(const char *s, size_t n, const char *lit) {

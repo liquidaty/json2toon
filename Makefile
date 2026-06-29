@@ -96,6 +96,18 @@ ifneq ($(STATIC_BUILD),)
   endif
 endif
 
+# Restrict the shared object's exports to the public API, keeping vendored yajl
+# internal (its headers force default visibility, which -fvisibility=hidden can't
+# undo). Done at link time: symbol glob on macOS, version script on ELF, nothing
+# on Windows (yajl is not dllexport'd there).
+ifeq ($(SHLIB_EXT),dylib)
+  SHLIB_EXPORT := -Wl,-exported_symbol,_json2toon_* -Wl,-exported_symbol,_toon2json_*
+else ifeq ($(SHLIB_EXT),so)
+  SHLIB_EXPORT := -Wl,--version-script=json2toon.map
+else
+  SHLIB_EXPORT :=
+endif
+
 # ------------------------------------------------------------------- flags
 WARN := -Wall -Wextra -Wno-unused-parameter
 BASE_CFLAGS := -std=c11 $(WARN) -Iinclude -Isrc -fPIC
@@ -116,8 +128,33 @@ ifeq ($(ASAN),1)
   OPT_CFLAGS := -O1
 endif
 
-ALL_CFLAGS := $(BASE_CFLAGS) $(OPT_CFLAGS) $(SAN_CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS)
+# --------------------------------------------------------- vendored yajl
+# The forward path validates arrays with the YAJL parser. A parser-only subset is
+# vendored under third_party/yajl by default (self-contained cross builds);
+# ./configure --with-yajl=DIR sets YAJL_VENDORED=0 / YAJL_LIBS=-lyajl instead. The
+# defaults below let a standalone `make` (no ./configure) use the vendored copy.
+YAJL_DIR := third_party/yajl
+YAJL_VENDORED ?= 1
+YAJL_CFLAGS ?= -I$(YAJL_DIR)
+YAJL_LIBS ?=
+
+ifeq ($(YAJL_VENDORED),1)
+  YAJL_SRCS := $(YAJL_DIR)/yajl.c $(YAJL_DIR)/yajl_alloc.c $(YAJL_DIR)/yajl_buf.c \
+               $(YAJL_DIR)/yajl_encode.c $(YAJL_DIR)/yajl_lex.c \
+               $(YAJL_DIR)/yajl_parser.c $(YAJL_DIR)/yajl_version.c
+  YAJL_OBJS := $(YAJL_SRCS:$(YAJL_DIR)/%.c=$(OBJDIR)/yajl/%.o)
+else
+  YAJL_SRCS :=
+  YAJL_OBJS :=
+endif
+
+ALL_CFLAGS := $(BASE_CFLAGS) $(OPT_CFLAGS) $(SAN_CFLAGS) $(YAJL_CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS)
 ALL_LDFLAGS := $(SAN_LDFLAGS) $(EXTRA_LDFLAGS) $(LDFLAGS)
+
+# Vendored yajl is third-party: suppress its warnings (-w) and hide its symbols,
+# but keep the opt/sanitiser/PIC flags (so ASan instruments it; links cleanly).
+YAJL_OBJ_CFLAGS := -std=c11 -w $(OPT_CFLAGS) $(SAN_CFLAGS) -fPIC -fvisibility=hidden \
+                   $(YAJL_CFLAGS) $(EXTRA_CFLAGS) $(CFLAGS)
 
 # Applied only to the library's own translation units (not to consumers such as
 # the CLI or the tests): export the annotated public API and hide every other
@@ -125,8 +162,8 @@ ALL_LDFLAGS := $(SAN_LDFLAGS) $(EXTRA_LDFLAGS) $(LDFLAGS)
 LIB_CFLAGS := -DJSON2TOON_BUILD -fvisibility=hidden
 
 # ----------------------------------------------------- sources / artifacts
-LIB_SRCS := src/json2toon.c src/toon2json.c src/dom.c src/format.c src/simd.c \
-            src/convenience.c
+LIB_SRCS := src/json2toon.c src/toon2json.c src/store.c src/encode_array.c \
+            src/format.c src/simd.c src/convenience.c
 LIB_OBJS := $(LIB_SRCS:src/%.c=$(OBJDIR)/%.o)
 
 STATIC_LIB := $(BUILDDIR)/libjson2toon.a
@@ -195,8 +232,15 @@ app: $(APP)
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
+$(OBJDIR)/yajl:
+	mkdir -p $(OBJDIR)/yajl
+
 $(OBJDIR)/%.o: src/%.c | $(OBJDIR)
 	$(CC) $(ALL_CFLAGS) $(LIB_CFLAGS) -c $< -o $@
+
+# Vendored yajl translation units (only when YAJL_VENDORED=1).
+$(OBJDIR)/yajl/%.o: $(YAJL_DIR)/%.c | $(OBJDIR)/yajl
+	$(CC) $(YAJL_OBJ_CFLAGS) -c $< -o $@
 
 $(OBJDIR)/main.o: app/main.c | $(OBJDIR)
 	$(CC) $(ALL_CFLAGS) -c $< -o $@
@@ -204,12 +248,12 @@ $(OBJDIR)/main.o: app/main.c | $(OBJDIR)
 $(OBJDIR)/test.o: tests/test.c | $(OBJDIR)
 	$(CC) $(ALL_CFLAGS) -c $< -o $@
 
-$(STATIC_LIB): $(LIB_OBJS)
-	$(AR) rcs $@ $(LIB_OBJS)
+$(STATIC_LIB): $(LIB_OBJS) $(YAJL_OBJS)
+	$(AR) rcs $@ $(LIB_OBJS) $(YAJL_OBJS)
 	$(RANLIB) $@ 2>/dev/null || true
 
-$(SHARED_LIB_REAL): $(LIB_OBJS)
-	$(CC) $(ALL_LDFLAGS) $(SHLIB_LDFLAGS) -o $@ $(LIB_OBJS)
+$(SHARED_LIB_REAL): $(LIB_OBJS) $(YAJL_OBJS)
+	$(CC) $(ALL_LDFLAGS) $(SHLIB_LDFLAGS) $(SHLIB_EXPORT) -o $@ $(LIB_OBJS) $(YAJL_OBJS) $(YAJL_LIBS)
 
 # Dev/linker symlink -> real versioned object (ELF/macOS). On Windows
 # SHARED_LIB == SHARED_LIB_REAL, so this rule is omitted (no ln, no symlinks).
@@ -219,10 +263,10 @@ $(SHARED_LIB): $(SHARED_LIB_REAL)
 endif
 
 $(APP): $(OBJDIR)/main.o $(STATIC_LIB)
-	$(CC) $(ALL_LDFLAGS) -o $@ $(OBJDIR)/main.o $(STATIC_LIB)
+	$(CC) $(ALL_LDFLAGS) -o $@ $(OBJDIR)/main.o $(STATIC_LIB) $(YAJL_LIBS)
 
 $(TESTBIN): $(OBJDIR)/test.o $(STATIC_LIB)
-	$(CC) $(ALL_LDFLAGS) -o $@ $(OBJDIR)/test.o $(STATIC_LIB)
+	$(CC) $(ALL_LDFLAGS) -o $@ $(OBJDIR)/test.o $(STATIC_LIB) $(YAJL_LIBS)
 
 test check: $(TESTBIN)
 	$(TESTBIN)
@@ -247,9 +291,9 @@ FUZZ_CC ?= clang
 FUZZBIN := $(BUILDDIR)/fuzz$(EXE_EXT)
 FUZZSTANDALONE := $(BUILDDIR)/fuzz-standalone$(EXE_EXT)
 
-$(FUZZBIN): $(LIB_SRCS) tests/fuzz.c | $(OBJDIR)
-	$(FUZZ_CC) $(BASE_CFLAGS) -g -O1 -fno-omit-frame-pointer \
-	  -fsanitize=fuzzer,address,undefined -o $@ $(LIB_SRCS) tests/fuzz.c
+$(FUZZBIN): $(LIB_SRCS) $(YAJL_SRCS) tests/fuzz.c | $(OBJDIR)
+	$(FUZZ_CC) $(BASE_CFLAGS) $(YAJL_CFLAGS) -g -O1 -fno-omit-frame-pointer \
+	  -fsanitize=fuzzer,address,undefined -o $@ $(LIB_SRCS) $(YAJL_SRCS) tests/fuzz.c $(YAJL_LIBS)
 
 fuzz: $(FUZZBIN)
 	@echo "built $(FUZZBIN)"
@@ -262,7 +306,7 @@ $(OBJDIR)/fuzz-standalone.o: tests/fuzz.c | $(OBJDIR)
 	$(CC) $(ALL_CFLAGS) -DJ2T_FUZZ_STANDALONE -c $< -o $@
 
 $(FUZZSTANDALONE): $(OBJDIR)/fuzz-standalone.o $(STATIC_LIB)
-	$(CC) $(ALL_LDFLAGS) -o $@ $(OBJDIR)/fuzz-standalone.o $(STATIC_LIB)
+	$(CC) $(ALL_LDFLAGS) -o $@ $(OBJDIR)/fuzz-standalone.o $(STATIC_LIB) $(YAJL_LIBS)
 
 fuzz-standalone: $(FUZZSTANDALONE)
 	@echo "built $(FUZZSTANDALONE)"

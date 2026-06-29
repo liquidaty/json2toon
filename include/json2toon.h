@@ -28,9 +28,9 @@ extern "C" {
  *   #endif
  */
 #define JSON2TOON_VERSION_MAJOR 1
-#define JSON2TOON_VERSION_MINOR 1
+#define JSON2TOON_VERSION_MINOR 2
 #define JSON2TOON_VERSION_PATCH 0
-#define JSON2TOON_VERSION "1.1.0"
+#define JSON2TOON_VERSION "1.2.0"
 #define JSON2TOON_VERSION_NUMBER                                          \
   (JSON2TOON_VERSION_MAJOR * 10000 + JSON2TOON_VERSION_MINOR * 100 +       \
    JSON2TOON_VERSION_PATCH)
@@ -73,9 +73,18 @@ typedef int (*json2toon_sink)(const char *data, size_t len, void *ctx);
  * field also selects the default for that field. */
 typedef struct {
   unsigned indent;          /* spaces per indentation level (default 2) */
-  unsigned max_depth;       /* maximum nesting depth (default 256) */
-  size_t max_array_bytes;   /* cap on the raw size of a single buffered array
-                             * (default 0 == a large built-in limit) */
+  unsigned max_depth;       /* maximum nesting depth (default 128) */
+  size_t max_array_bytes;   /* cap on the raw size of a single buffered array,
+                             * in bytes (default 0 == unlimited). Exceeding it
+                             * is JSON2TOON_ERR_LIMIT. */
+  size_t lookahead_buffer_size; /* RAM kept for a buffered array before the
+                             * overflow spills to a temp file (default 0 == 1
+                             * MiB). Tunes RAM-vs-disk only; never changes the
+                             * output, which is byte-identical at any setting. */
+  char *(*get_temp_filename)(const char *prefix); /* names the spill file:
+                             * returns a malloc'd path the library fopen()s and,
+                             * on cleanup, remove()s then free()s (so it must stay
+                             * valid until cleanup). NULL (default) == tmpfile(). */
 } json2toon_options;
 
 typedef struct json2toon json2toon_t;
@@ -124,7 +133,7 @@ JSON2TOON_API const char *json2toon_version(void);
 /* Configuration for the reverse converter. Pass NULL to accept all defaults;
  * a zero field also selects that field's default. */
 typedef struct {
-  unsigned max_depth;       /* maximum nesting depth (default 256) */
+  unsigned max_depth;       /* maximum nesting depth (default 128) */
   size_t max_line_bytes;    /* cap on a single buffered input line
                              * (default 0 == a large built-in limit) */
   int lenient;              /* if non-zero, accept any unquoted value as a bare

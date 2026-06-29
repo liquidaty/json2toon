@@ -4,6 +4,40 @@ All notable changes to libjson2toon are recorded here. The version is defined
 once in `include/json2toon.h` (`JSON2TOON_VERSION`); `json2toon_version()` and
 the generated `json2toon.pc` both derive from it.
 
+## 1.2.0
+
+### Added
+- Bounded-memory array encoding. Each buffered array's raw bytes now live in a
+  backing store that keeps a configurable RAM window and spills the overflow to
+  a temp file, so peak memory for an array is a fixed lookahead window plus a
+  shallow parse stack — not the array length. Two additive `json2toon_options`
+  fields tune this (a zero field keeps the default, so the struct stays
+  source-compatible; consumers should recompile as it grew):
+  - `lookahead_buffer_size` — bytes kept resident before spilling (default
+    1 MiB). Affects only RAM-vs-disk; the output is byte-identical at any value.
+  - `get_temp_filename` — supplies the spill file's path (the library `fopen`s
+    it and, on cleanup, `remove`s then `free`s the name). `NULL` (default) uses
+    `tmpfile()`.
+- Array nesting is now bounded by `max_depth` (past it: `JSON2TOON_ERR_DEPTH`),
+  matching objects; previously deep `[[[…]]]` was bounded only incidentally.
+
+### Changed
+- Tabular array detection is now order-insensitive, per TOON spec §9.3: objects
+  sharing the same key *set* (order may vary per object) encode as a table, with
+  columns in the first object's key order. Objects with duplicate keys decline
+  the tabular form. Previously keys had to appear in identical order.
+- Default `max_depth` lowered from 256 to 128 for both directions, so objects
+  and arrays share one consistent limit.
+- The forward path validates each array with a vendored parser-only subset of
+  [YAJL](https://github.com/lloyd/yajl) 2.1.1 (`third_party/yajl/`), replacing
+  the in-memory DOM (`src/dom.c` removed). `./configure --with-yajl=DIR` links an
+  external yajl instead. The shared object's exported symbols stay restricted to
+  the public API (the vendored yajl is kept internal).
+
+### Fixed
+- Documentation: `max_array_bytes == 0` means *unlimited* (the prior "large
+  built-in limit" comment was wrong).
+
 ## 1.1.0
 
 ### Added
