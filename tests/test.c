@@ -696,6 +696,15 @@ int main(void) {
   check_ok("empty-array-field", "{\"tags\":[]}", "tags: []\n");
   check_ok("empty-array-root", "[]", "[]\n");
 
+  /* empty-STRING key + array value: the captured-array path must emit the key
+   * (`""`) -- it once used `key != NULL` to detect a member, but an empty key
+   * has a NULL buffer pointer, so the key (and round-trip) was lost. */
+  check_ok("empty-key-empty-array", "{\"\":[]}", "\"\": []\n");
+  check_ok("empty-key-inline-array", "{\"\":[1,2]}", "\"\"[2]: 1,2\n");
+  check_ok("empty-key-tabular-array", "{\"\":[{\"x\":1}]}", "\"\"[1]{x}:\n  1\n");
+  check_ok("empty-key-array-then-field", "{\"\":[],\"b\":2}", "\"\": []\nb: 2\n");
+  check_roundtrip("empty-key-array-roundtrip", "{\"\":[],\"tag$s\":[\"a\"]}");
+
   /* tabular arrays */
   check_ok("tabular",
            "{\"users\":[{\"id\":1,\"name\":\"Alice\",\"role\":\"admin\"},"

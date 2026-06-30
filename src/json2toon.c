@@ -144,8 +144,7 @@ static int cap_append(json2toon *j, const char *p, size_t n, size_t off) {
 static void capture_done(json2toon *j) {
   uint64_t errpos = 0;
   int rc = j2t_encode_captured(&j->out, &j->store, j->cap_level,
-                               j->cap_has_key ? j->key.p : NULL,
-                               j->cap_has_key ? j->key.len : 0,
+                               j->cap_has_key, j->key.p, j->key.len,
                                j->opt.max_depth, &errpos);
   /* Free the captured bytes (and any temp file) on every path. */
   j2t_store_reset(&j->store);

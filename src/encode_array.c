@@ -749,7 +749,7 @@ static void emit_array_dispatch(j2t_enc *e, uint64_t start, uint64_t end,
 /* ------------------------------------------------------------- public API */
 
 int j2t_encode_captured(j2t_out *o, j2t_store *s, unsigned level,
-                        const char *key, size_t keylen,
+                        int has_key, const char *key, size_t keylen,
                         unsigned max_depth, uint64_t *errpos) {
   j2t_enc e;
   int kind, rc;
@@ -768,12 +768,12 @@ int j2t_encode_captured(j2t_out *o, j2t_store *s, unsigned level,
   }
 
   j2t_indent(o, level);
-  if (count == 0) {                          /* empty root array */
-    if (key) { j2t_emit_key(o, key, keylen); j2t_puts(o, ": []"); }
+  if (count == 0) {                          /* empty array */
+    if (has_key) { j2t_emit_key(o, key, keylen); j2t_puts(o, ": []"); }
     else j2t_puts(o, "[]");
     j2t_putc(o, '\n');
   } else {
-    if (key) j2t_emit_key(o, key, keylen);
+    if (has_key) j2t_emit_key(o, key, keylen);
     emit_array_dispatch(&e, 0, s->total, level, kind, count);
   }
 

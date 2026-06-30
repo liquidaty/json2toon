@@ -130,11 +130,14 @@ size_t j2t_reader_read(j2t_reader *r, char *dst, size_t n);  /* bulk; advances *
 /* ----------------------------------------------------------- array encoder */
 
 /* Encode the array filling `s` (a complete "[...]") as TOON. `level` is the
- * header line's indent level; `key`/`keylen` is the decoded key before '[' (NULL
- * for a root array); `max_depth` bounds nesting (ERR_DEPTH past it). On a parse
- * or depth error, *errpos gets the array-relative byte offset. */
+ * header line's indent level. `has_key` distinguishes an object member (emit
+ * `key:` before the header) from a root array (no key); when set, `key`/`keylen`
+ * is the decoded key before '[' -- which may be (NULL, 0) for an empty-string
+ * key, so the pointer alone must NOT be used to decide whether a key exists.
+ * `max_depth` bounds nesting (ERR_DEPTH past it). On a parse or depth error,
+ * *errpos gets the array-relative byte offset. */
 int j2t_encode_captured(j2t_out *o, j2t_store *s, unsigned level,
-                        const char *key, size_t keylen,
+                        int has_key, const char *key, size_t keylen,
                         unsigned max_depth, uint64_t *errpos);
 
 #endif /* JSON2TOON_INTERNAL_H */
