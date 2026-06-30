@@ -12,10 +12,32 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* Discard sink: 0 == keep going. */
 static int null_sink(const char *data, size_t len, void *ctx) {
   (void)data; (void)len; (void)ctx;
+  return 0;
+}
+
+/* Growable capture sink for the round-trip oracle. Returns -1 (and flags oom)
+ * on allocation failure, which the converter surfaces as a sticky error. */
+typedef struct { char *p; size_t len, cap; int oom; } cap_sink;
+static int cap_write(const char *data, size_t len, void *ctx) {
+  cap_sink *c = (cap_sink *)ctx;
+  if (c->len + len > c->cap) {
+    size_t nc = c->cap ? c->cap : 256;
+    char *nb;
+    while (nc < c->len + len)
+      nc *= 2;
+    nb = (char *)realloc(c->p, nc);
+    if (!nb) { c->oom = 1; return -1; }
+    c->p = nb;
+    c->cap = nc;
+  }
+  memcpy(c->p + c->len, data, len);
+  c->len += len;
   return 0;
 }
 
@@ -56,9 +78,58 @@ static void run_one(const codec *c, const uint8_t *data, size_t len) {
   c->destroy(conv);
 }
 
+/* Feed [in,n) whole through one converter into `out`; returns the converter's
+ * final status. (Chunk-boundary coverage is run_one's job; the round-trip
+ * property is chunk-independent.) */
+static int run_fwd(const char *in, size_t n, cap_sink *out) {
+  json2toon_t *j = json2toon_new(cap_write, out, NULL);
+  int rc;
+  if (!j)
+    return JSON2TOON_ERR_MEMORY;
+  rc = json2toon_feed(j, in, n);
+  if (rc == JSON2TOON_OK)
+    rc = json2toon_finish(j);
+  json2toon_delete(j);
+  return rc;
+}
+static int run_rev(const char *in, size_t n, cap_sink *out) {
+  toon2json_t *t = toon2json_new(cap_write, out, NULL);
+  int rc;
+  if (!t)
+    return JSON2TOON_ERR_MEMORY;
+  rc = toon2json_feed(t, in, n);
+  if (rc == JSON2TOON_OK)
+    rc = toon2json_finish(t);
+  toon2json_delete(t);
+  return rc;
+}
+
+/* Round-trip oracle (acceptance #1). For any input json2toon accepts as a
+ * complete JSON document, the TOON it emits MUST round-trip: it must re-parse
+ * as valid JSON, and re-encoding that JSON must reproduce byte-identical TOON
+ * (TOON is the canonical form). A failure means the converter reported success
+ * while emitting non-round-trippable output -- the silent-miscompile class this
+ * test exists to pin. Any abort() is a real find. */
+static void run_roundtrip(const uint8_t *data, size_t len) {
+  cap_sink toon = {0}, json = {0}, toon2 = {0};
+  if (run_fwd((const char *)data, len, &toon) != JSON2TOON_OK || toon.oom)
+    goto done;                       /* x is not JSON we accept: nothing to check */
+  if (run_rev(toon.p, toon.len, &json) != JSON2TOON_OK || json.oom)
+    abort();                         /* emitted TOON does not parse: miscompile */
+  if (run_fwd(json.p, json.len, &toon2) != JSON2TOON_OK || toon2.oom)
+    abort();                         /* emitted JSON is itself invalid: miscompile */
+  if (toon.len != toon2.len || memcmp(toon.p, toon2.p, toon.len) != 0)
+    abort();                         /* round-trip changed structure: miscompile */
+done:
+  free(toon.p);
+  free(json.p);
+  free(toon2.p);
+}
+
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t len) {
   run_one(&J2T, data, len);   /* as JSON */
   run_one(&T2J, data, len);   /* as TOON */
+  run_roundtrip(data, len);   /* json2toon(x) must round-trip */
   return 0;
 }
 
