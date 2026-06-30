@@ -55,7 +55,7 @@ void j2t_putc(j2t_out *o, char c) {
 void j2t_puts(j2t_out *o, const char *s) { j2t_write(o, s, strlen(s)); }
 
 void j2t_indent(j2t_out *o, unsigned level) {
-  unsigned n = level * o->indent_width;
+  size_t n = (size_t)level * o->indent_width;
   static const char spaces[16] =
       {' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' '};
   while (n >= sizeof spaces) {
