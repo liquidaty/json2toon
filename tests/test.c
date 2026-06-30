@@ -309,6 +309,10 @@ static char *unwritable_tmpname(const char *prefix) {
   (void)prefix;
   return dupstr("/json2toon_no_such_dir/spill.tmp");
 }
+static char *existing_tmpname(const char *prefix) {
+  (void)prefix;
+  return dupstr("/tmp/j2t_test_existing_spill.tmp");
+}
 #endif
 
 static void run_array_store_tests(void) {
@@ -346,13 +350,17 @@ static void run_array_store_tests(void) {
     free(back);
   }
 
-  /* Set inequality / duplicate keys decline tabular and fall back to a list. */
+  /* Set inequality declines tabular and falls back to a list. */
   check_ok("not-tabular-extra-key", "[{\"a\":1},{\"a\":1,\"b\":2}]",
            "[2]:\n  - a: 1\n  - a: 1\n    b: 2\n");
   check_ok("not-tabular-missing-key", "[{\"a\":1,\"b\":2},{\"a\":3}]",
            "[2]:\n  - a: 1\n    b: 2\n  - a: 3\n");
-  check_ok("not-tabular-dup-key", "[{\"a\":1,\"a\":2}]",
-           "[1]:\n  - a: 1\n    a: 2\n");
+  /* Duplicate keys violate TOON's unique-key rule: reject on the bounded
+   * array-capture path (4a) -- lone object, list element, row, nested array. */
+  check_err("dup-key-single", "[{\"a\":1,\"a\":2}]");
+  check_err("dup-key-list-element", "[1,{\"a\":1,\"a\":2}]");
+  check_err("dup-key-tabular-row", "[{\"a\":1},{\"a\":2,\"a\":3}]");
+  check_err("dup-key-nested-array", "[[{\"a\":1,\"a\":2}]]");
 
   /* Edge sweep: empty objects/arrays as list items. */
   check_ok("list-empty-object-item", "[{}]", "[1]:\n  -\n");
@@ -398,6 +406,24 @@ static void run_array_store_tests(void) {
     rc = drive(json2toon_new(sbuf_sink, &b, &o), &FWD, &b,
                "[1,2,3,4,5,6,7,8,9,10]", 22, 0, &out);
     cv_bool("spill-io-error", rc == JSON2TOON_ERR_IO);
+    free(out);
+  }
+
+  /* 4c: a temp name that already exists must be refused (O_EXCL), not silently
+   * truncated as fopen(name,"w+b") would -- the predictable-name TOCTOU defense. */
+  {
+    char *out = NULL;
+    sbuf b = {0, 0, 0, 0};
+    int rc;
+    FILE *pre = fopen("/tmp/j2t_test_existing_spill.tmp", "wb");
+    if (pre) fclose(pre);
+    memset(&o, 0, sizeof o);
+    o.lookahead_buffer_size = 4;
+    o.get_temp_filename = existing_tmpname;
+    rc = drive(json2toon_new(sbuf_sink, &b, &o), &FWD, &b,
+               "[1,2,3,4,5,6,7,8,9,10]", 22, 0, &out);
+    cv_bool("spill-excl-existing", rc == JSON2TOON_ERR_IO);
+    remove("/tmp/j2t_test_existing_spill.tmp");
     free(out);
   }
 #endif
@@ -826,6 +852,9 @@ int main(void) {
   check_rev_err("rev-err-trailing-after-scalar", "42\nx\n");
   check_rev_err("rev-err-bad-tabular-arity", "[2]{a,b}:\n  1\n");
   check_rev_err("rev-err-count-mismatch-inline", "n[3]: 1,2\n");
+  /* 4b: 2^64+1 wraps to 1 in size_t; without the saturating guard it would
+   * spuriously match the single element and be accepted. */
+  check_rev_err("rev-err-count-overflow", "[18446744073709551617]: 5\n");
   check_rev_err("rev-err-item-in-object", "a: 1\n- 2\n");
 
   /* round trips through both directions */

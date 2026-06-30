@@ -19,6 +19,11 @@
  * Peak memory = column template + one tabular row + O(max_depth) parse handles,
  * regardless of array length. Output is identical whether bytes stayed in RAM
  * or spilled.
+ *
+ * Perf note (3c): a spilled array's bytes are re-read once per pass -- the
+ * top-level shape (which also validates) and the emit pass -- and each nested
+ * array/object level is re-parsed when it is shaped and emitted. Folding the
+ * standalone validate pass into the top-level shape (#1) removed one full re-read.
  */
 #include "internal.h"
 
@@ -269,7 +274,7 @@ static int sh_start_map(void *c) {
   if (x->depth == 1) {                         /* direct-child object */
     x->count++;
     x->all_scalar = 0;
-    if (x->tab_ok) { x->e->kl_n = 0; x->e->kl_buf.len = 0; }  /* collect its keys */
+    x->e->kl_n = 0; x->e->kl_buf.len = 0;      /* collect its keys (dup check + template) */
   } else if (x->depth >= 2) {
     x->tab_ok = 0;                             /* container as a member value */
   }
@@ -287,7 +292,17 @@ static int sh_start_array(void *c) {
 }
 static int sh_map_key(void *c, const unsigned char *k, size_t n) {
   shape_ctx *x = (shape_ctx *)c;
-  if (x->depth == 2 && x->tab_ok) {
+  /* Keys of a direct-child object. TOON keys are unique, so reject a duplicate
+   * (4a) -- bounded: only one object's keys are held. Dups in object-VALUED
+   * members (depth >= 3 here) and in the streaming top-level object are not seen
+   * by this bounded path and pass through; see json2toon.c. */
+  if (x->depth == 2) {
+    size_t i;
+    for (i = 0; i < x->e->kl_n; i++)
+      if (x->e->kl[i].len == n &&
+          memcmp(x->e->kl_buf.p + x->e->kl[i].off, k, n) == 0) {
+        return 0;                              /* duplicate key -> ERR_PARSE */
+      }
     if (kl_push(x->e, k, n) != 0) { x->mem_err = 1; return 0; }
   }
   return 1;

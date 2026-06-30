@@ -82,6 +82,22 @@ jobs:
       - name: Test
         run: make test
 
+  # Strict-warnings lane: compile the library TUs under an explicit standard
+  # with -Werror -Wconversion -Wshadow -Wstrict-prototypes -Wvla, on both
+  # compilers. Catches implicit narrowing / shadowing the default build tolerates.
+  strict:
+    name: linux (strict-warnings)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: ./configure
+      - name: Strict compile (gcc)
+        run: make strict CC=gcc
+      - name: Strict compile (clang)
+        run: make strict CC=clang
+
   # --------------------------------------------------------------- macOS
   # Apple-silicon (arm64) runs on every push/PR; it's plentiful and fast.
   macos:

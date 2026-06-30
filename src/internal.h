@@ -2,6 +2,8 @@
 #ifndef JSON2TOON_INTERNAL_H
 #define JSON2TOON_INTERNAL_H
 
+#include "j2t_config.h"      /* first: feature-test macros + J2T_FSEEK/FTELL */
+
 #include <stddef.h>
 #include <stdint.h>
 #include "json2toon.h"
@@ -80,21 +82,6 @@ extern j2t_scan_fn j2t_skip_ws;
  * or a control byte (< 0x20). */
 extern j2t_scan_fn j2t_scan_string;
 const char *j2t_simd_backend(void);
-
-/* ------------------------------------------------------- 64-bit file offsets */
-
-/* Spilled arrays can exceed 2 GiB, so seeks need 64-bit offsets, not fseek's
- * `long`. (store.c defines _FILE_OFFSET_BITS so fseeko is 64-bit on 32-bit POSIX.) */
-#if defined(_WIN32)
-#  define J2T_FSEEK(fp, off) (_fseeki64((fp), (long long)(off), SEEK_SET))
-#  define J2T_FTELL(fp)      ((int64_t)_ftelli64(fp))
-#elif defined(__unix__) || defined(__APPLE__)
-#  define J2T_FSEEK(fp, off) (fseeko((fp), (off_t)(off), SEEK_SET))
-#  define J2T_FTELL(fp)      ((int64_t)ftello(fp))
-#else
-#  define J2T_FSEEK(fp, off) (fseek((fp), (long)(off), SEEK_SET))
-#  define J2T_FTELL(fp)      ((int64_t)ftell(fp))
-#endif
 
 /* ------------------------------------------------------------- backing store */
 

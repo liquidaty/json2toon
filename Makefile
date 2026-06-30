@@ -194,7 +194,7 @@ ifeq ($(ENABLE_SHARED),1)
 endif
 
 .PHONY: help all build lib app test check test-leaks fuzz fuzz-standalone \
-        install install-lib install-app uninstall uninstall-lib uninstall-app \
+        strict install install-lib install-app uninstall uninstall-lib uninstall-app \
         clean distclean print-builddir
 .DEFAULT_GOAL := help
 
@@ -208,6 +208,7 @@ help:
 	@echo '  test          build and run the unit/round-trip test suite'
 	@echo '  check         alias for test'
 	@echo '  test-leaks    run the test suite under a leak checker'
+	@echo '  strict        strict-warnings compile of the library TUs (-Werror +)'
 	@echo '  fuzz          build the libFuzzer target (needs an LLVM clang)'
 	@echo '  fuzz-standalone  build the portable replay driver (any toolchain)'
 	@echo '  install       install lib + CLI under PREFIX (default /usr/local)'
@@ -270,6 +271,20 @@ $(TESTBIN): $(OBJDIR)/test.o $(STATIC_LIB)
 
 test check: $(TESTBIN)
 	$(TESTBIN)
+
+# Strict-warnings lane (not part of the default build): syntax-check the
+# library's own translation units under an explicit standard with extra
+# diagnostics promoted to errors. Vendored yajl is third-party and excluded
+# (it builds under -w). Run across compilers, e.g. `make strict CC=gcc`.
+STRICT_WARN := -std=c11 -pedantic -Wall -Wextra -Werror \
+               -Wconversion -Wshadow -Wstrict-prototypes -Wvla
+strict:
+	@for f in $(LIB_SRCS); do \
+	  echo "  STRICT $$f"; \
+	  $(CC) $(STRICT_WARN) -Iinclude -Isrc $(YAJL_CFLAGS) -DJSON2TOON_BUILD \
+	    -fsyntax-only $$f || exit 1; \
+	done
+	@echo "strict: clean ($(CC))"
 
 # Leak check: use macOS 'leaks' when available, else fall back to running the
 # suite directly (sanitizer/Valgrind targets cover leaks on other platforms).

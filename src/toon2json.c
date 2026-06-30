@@ -375,7 +375,12 @@ static void parse_count(const char **pp, const char *end, size_t *val,
   size_t v = 0;
   int any = 0;
   while (p < end && *p >= '0' && *p <= '9') {
-    v = v * 10 + (size_t)(*p - '0');
+    size_t d = (size_t)(*p - '0');
+    /* Saturate rather than wrap: a wrapped count could spuriously match the
+     * actual element count and pass the declared-count check (4b). SIZE_MAX is
+     * unreachable as a real count, so a saturated value always mismatches. */
+    if (v > (SIZE_MAX - d) / 10) v = SIZE_MAX;
+    else v = v * 10 + d;
     p++;
     any = 1;
   }

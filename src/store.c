@@ -5,17 +5,7 @@
  * stay in `ram` up to a threshold and the overflow spills to a temp file. RAM vs
  * spill is invisible to the output: the reader yields the same bytes either way.
  */
-/* fseeko/ftello (and a 64-bit off_t) are POSIX, which glibc hides under
- * -std=c11 (__STRICT_ANSI__); request them, and 64-bit offsets on 32-bit POSIX,
- * before any header is pulled in. */
-#ifndef _FILE_OFFSET_BITS
-#define _FILE_OFFSET_BITS 64
-#endif
-#if !defined(_POSIX_C_SOURCE) && !defined(_WIN32)
-#define _POSIX_C_SOURCE 200809L
-#endif
-
-#include "internal.h"
+#include "internal.h"      /* includes j2t_config.h first (feature-test macros) */
 
 #include <stdlib.h>
 #include <string.h>
@@ -45,7 +35,9 @@ static int spill_open(j2t_store *s) {
       s->err = JSON2TOON_ERR_IO;
       return -1;
     }
-    s->fp = fopen(s->tmpname, "w+b");
+    /* Exclusive-create: a caller-supplied name in a shared dir is otherwise a
+     * predictable-name symlink/TOCTOU target (4c). tmpfile() is already safe. */
+    s->fp = j2t_fopen_excl(s->tmpname);
   } else {
     s->fp = tmpfile();
   }

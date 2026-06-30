@@ -50,7 +50,11 @@ struct json2toon {
 
   size_t depth;            /* number of open objects (the parse stack) */
 
-  /* current object key, awaiting its value */
+  /* current object key, awaiting its value. Streaming objects emit each member
+   * as it arrives, so a duplicate key passes through as two lines (lossy but
+   * bounded-memory); full dedup here would need an unbounded per-object key set.
+   * Duplicate keys ARE rejected on the bounded array-capture path (see
+   * encode_array.c sh_map_key). */
   j2t_buf key;
   int has_key;
 
