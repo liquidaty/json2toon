@@ -11,6 +11,7 @@
  * window plus a shallow parse stack -- not by array length.
  */
 #include "internal.h"
+#include "unicode.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -50,11 +51,11 @@ struct json2toon {
   size_t depth;            /* number of open objects (the parse stack) */
 
   /* current object key, awaiting its value */
-  char *key; size_t keylen, keycap;
+  j2t_buf key;
   int has_key;
 
   /* generic token buffer (string value / key text / number lexeme) */
-  char *tok; size_t toklen, tokcap;
+  j2t_buf tok;
 
   /* string lexer sub-state */
   int sstate;
@@ -79,39 +80,6 @@ typedef struct json2toon json2toon;
 
 /* --------------------------------------------------------------- utilities */
 
-static int buf_reserve(char **buf, size_t *cap, size_t need) {
-  if (need <= *cap)
-    return 0;
-  {
-    size_t nc = *cap ? *cap : 64;
-    char *nb;
-    while (nc < need)
-      nc *= 2;
-    nb = (char *)realloc(*buf, nc);
-    if (!nb)
-      return -1;
-    *buf = nb;
-    *cap = nc;
-  }
-  return 0;
-}
-
-static int buf_append(char **buf, size_t *len, size_t *cap, const char *p,
-                      size_t n) {
-  if (buf_reserve(buf, cap, *len + n) != 0)
-    return -1;
-  memcpy(*buf + *len, p, n);
-  *len += n;
-  return 0;
-}
-
-static int buf_putc(char **buf, size_t *len, size_t *cap, char c) {
-  if (buf_reserve(buf, cap, *len + 1) != 0)
-    return -1;
-  (*buf)[(*len)++] = c;
-  return 0;
-}
-
 static void set_err(json2toon *j, int code, size_t off) {
   if (j->err == JSON2TOON_OK) {
     j->err = code;
@@ -122,19 +90,8 @@ static void set_err(json2toon *j, int code, size_t off) {
 
 static int utf8_emit(json2toon *j, unsigned cp) {
   char b[4];
-  int n;
-  if (cp <= 0x7f) { b[0] = (char)cp; n = 1; }
-  else if (cp <= 0x7ff) {
-    b[0] = (char)(0xc0 | (cp >> 6)); b[1] = (char)(0x80 | (cp & 0x3f)); n = 2;
-  } else if (cp <= 0xffff) {
-    b[0] = (char)(0xe0 | (cp >> 12)); b[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
-    b[2] = (char)(0x80 | (cp & 0x3f)); n = 3;
-  } else {
-    b[0] = (char)(0xf0 | (cp >> 18)); b[1] = (char)(0x80 | ((cp >> 12) & 0x3f));
-    b[2] = (char)(0x80 | ((cp >> 6) & 0x3f)); b[3] = (char)(0x80 | (cp & 0x3f));
-    n = 4;
-  }
-  return buf_append(&j->tok, &j->toklen, &j->tokcap, b, (size_t)n);
+  int n = j2t_utf8_encode(cp, b);
+  return j2t_buf_append(&j->tok, b, (size_t)n);
 }
 
 /* Return to the appropriate state after a value has been fully emitted. */
@@ -147,12 +104,12 @@ static void emit_value_line(json2toon *j, int kind) {
   unsigned level = j->has_key ? (unsigned)(j->depth - 1) : 0;
   j2t_indent(&j->out, level);
   if (j->has_key) {
-    j2t_emit_key(&j->out, j->key, j->keylen);
+    j2t_emit_key(&j->out, j->key.p, j->key.len);
     j2t_puts(&j->out, ": ");
   }
   switch (kind) {
-    case K_STR: j2t_emit_string(&j->out, j->tok, j->toklen, DELIM); break;
-    case K_NUM: j2t_write(&j->out, j->tok, j->toklen); break;
+    case K_STR: j2t_emit_string(&j->out, j->tok.p, j->tok.len, DELIM); break;
+    case K_NUM: j2t_write(&j->out, j->tok.p, j->tok.len); break;
     case K_TRUE: j2t_puts(&j->out, "true"); break;
     case K_FALSE: j2t_puts(&j->out, "false"); break;
     case K_NULL: j2t_puts(&j->out, "null"); break;
@@ -183,8 +140,8 @@ static int cap_append(json2toon *j, const char *p, size_t n, size_t off) {
 static void capture_done(json2toon *j) {
   uint64_t errpos = 0;
   int rc = j2t_encode_captured(&j->out, &j->store, j->cap_level,
-                               j->cap_has_key ? j->key : NULL,
-                               j->cap_has_key ? j->keylen : 0,
+                               j->cap_has_key ? j->key.p : NULL,
+                               j->cap_has_key ? j->key.len : 0,
                                j->opt.max_depth, &errpos);
   /* Free the captured bytes (and any temp file) on every path. */
   j2t_store_reset(&j->store);
@@ -209,8 +166,7 @@ static void process_string(json2toon *j, const char **pp, const char *end,
     if (j->sstate == SS_NORMAL && j->u_high == 0) {
       const char *run = j2t_scan_string(p, end);
       if (run > p) {
-        if (buf_append(&j->tok, &j->toklen, &j->tokcap, p, (size_t)(run - p))
-            != 0) {
+        if (j2t_buf_append(&j->tok, p, (size_t)(run - p)) != 0) {
           set_err(j, JSON2TOON_ERR_MEMORY, base + (size_t)(p - *pp));
           *pp = p; return;
         }
@@ -224,12 +180,10 @@ static void process_string(json2toon *j, const char **pp, const char *end,
           p++;
           /* string complete */
           if (j->str_is_key) {
-            if (buf_reserve(&j->key, &j->keycap, j->toklen ? j->toklen : 1)
-                != 0) {
+            j->key.len = 0;
+            if (j2t_buf_append(&j->key, j->tok.p, j->tok.len) != 0) {
               set_err(j, JSON2TOON_ERR_MEMORY, base); *pp = p; return;
             }
-            memcpy(j->key, j->tok, j->toklen);
-            j->keylen = j->toklen;
             j->has_key = 1;
             j->state = ST_OBJ_COLON;
           } else {
@@ -277,7 +231,7 @@ static void process_string(json2toon *j, const char **pp, const char *end,
         set_err(j, JSON2TOON_ERR_PARSE, base + (size_t)(p - 1 - *pp));
         *pp = p; return;
       }
-      if (buf_putc(&j->tok, &j->toklen, &j->tokcap, out) != 0) {
+      if (j2t_buf_putc(&j->tok, out) != 0) {
         set_err(j, JSON2TOON_ERR_MEMORY, base); *pp = p; return;
       }
       j->sstate = SS_NORMAL;
@@ -330,13 +284,13 @@ static void start_string(json2toon *j, int is_key) {
   j->sstate = SS_NORMAL;
   j->str_is_key = is_key;
   j->u_count = 0; j->u_val = 0; j->u_high = 0;
-  j->toklen = 0;
+  j->tok.len = 0;
 }
 
 static void begin_object(json2toon *j) {
   if (j->has_key) {
     j2t_indent(&j->out, (unsigned)(j->depth - 1));
-    j2t_emit_key(&j->out, j->key, j->keylen);
+    j2t_emit_key(&j->out, j->key.p, j->key.len);
     j2t_putc(&j->out, ':');
     j2t_putc(&j->out, '\n');
   }
@@ -382,7 +336,7 @@ static void dispatch_value(json2toon *j, const char **pp, const char *end,
               j->lit_pos = 0; j->state = ST_LITERAL; break;
     default:
       if (c == '-' || (c >= '0' && c <= '9')) {
-        j->toklen = 0;
+        j->tok.len = 0;
         j->state = ST_NUMBER;
       } else {
         set_err(j, JSON2TOON_ERR_PARSE, off);
@@ -464,14 +418,14 @@ int json2toon_feed(json2toon *j, const char *data, size_t len) {
             break;
         }
         if (p > s &&
-            buf_append(&j->tok, &j->toklen, &j->tokcap, s, (size_t)(p - s))
+            j2t_buf_append(&j->tok, s, (size_t)(p - s))
                 != 0) {
           set_err(j, JSON2TOON_ERR_MEMORY, base + (size_t)(s - data));
           break;
         }
         if (p < end) {
           /* a non-number byte terminates the number */
-          if (!j2t_looks_like_number(j->tok, j->toklen))
+          if (!j2t_looks_like_number(j->tok.p, j->tok.len))
             set_err(j, JSON2TOON_ERR_PARSE, base + (size_t)(p - data));
           else
             emit_value_line(j, K_NUM);
@@ -550,7 +504,7 @@ int json2toon_finish(json2toon *j) {
   /* A number can only be terminated by EOF when it is the whole document or
    * the document is otherwise complete; finalize it now. */
   if (j->state == ST_NUMBER) {
-    if (!j2t_looks_like_number(j->tok, j->toklen))
+    if (!j2t_looks_like_number(j->tok.p, j->tok.len))
       set_err(j, JSON2TOON_ERR_PARSE, j->stream_offset);
     else
       emit_value_line(j, K_NUM);
@@ -607,8 +561,8 @@ json2toon *json2toon_new(json2toon_sink sink, void *ctx,
 void json2toon_delete(json2toon *j) {
   if (!j)
     return;
-  free(j->key);
-  free(j->tok);
+  j2t_buf_free(&j->key);
+  j2t_buf_free(&j->tok);
   j2t_store_free(&j->store);
   free(j);
 }

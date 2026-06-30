@@ -163,7 +163,7 @@ LIB_CFLAGS := -DJSON2TOON_BUILD -fvisibility=hidden
 
 # ----------------------------------------------------- sources / artifacts
 LIB_SRCS := src/json2toon.c src/toon2json.c src/store.c src/encode_array.c \
-            src/format.c src/simd.c src/convenience.c
+            src/format.c src/simd.c src/convenience.c src/unicode.c src/buf.c
 LIB_OBJS := $(LIB_SRCS:src/%.c=$(OBJDIR)/%.o)
 
 STATIC_LIB := $(BUILDDIR)/libjson2toon.a

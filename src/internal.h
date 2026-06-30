@@ -6,6 +6,20 @@
 #include <stdint.h>
 #include "json2toon.h"
 
+/* --------------------------------------------------------- growable buffer */
+
+/* A heap byte buffer that grows geometrically. One shared implementation
+ * (buf.c) backs every "char*, len, cap" triplet in the converters. */
+typedef struct { char *p; size_t len, cap; } j2t_buf;
+
+/* Ensure capacity for at least `need` bytes total. 0 on success, -1 on OOM. */
+int  j2t_buf_reserve(j2t_buf *b, size_t need);
+/* Append n bytes / one byte. 0 on success, -1 on OOM. */
+int  j2t_buf_append(j2t_buf *b, const char *s, size_t n);
+int  j2t_buf_putc(j2t_buf *b, char c);
+/* Release storage and reset to empty. */
+void j2t_buf_free(j2t_buf *b);
+
 /* ------------------------------------------------------------------ output */
 
 /* Buffered output emitter. All TOON bytes pass through here; the buffer is
@@ -88,9 +102,7 @@ const char *j2t_simd_backend(void);
  * `ram` up to `threshold`; the overflow spills to a temp file so peak RAM stays
  * bounded regardless of array length. `ram` is reused across stored arrays. */
 typedef struct {
-  char *ram;                 /* resident bytes (pre-spill) / reusable scratch */
-  size_t ram_len;            /* bytes held in ram (only meaningful pre-spill) */
-  size_t ram_cap;
+  j2t_buf ram;               /* resident bytes (pre-spill); .len meaningful pre-spill */
   size_t threshold;          /* spill once a store would exceed this many bytes */
   int spilled;               /* non-zero once bytes have moved to fp */
   FILE *fp;                  /* spill file (NULL until spilled) */

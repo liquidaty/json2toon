@@ -24,9 +24,9 @@
 
 void j2t_store_init(j2t_store *s, size_t threshold,
                     char *(*get_temp_filename)(const char *prefix)) {
-  s->ram = NULL;
-  s->ram_len = 0;
-  s->ram_cap = 0;
+  s->ram.p = NULL;
+  s->ram.len = 0;
+  s->ram.cap = 0;
   s->threshold = threshold ? threshold : (1u << 20);
   s->spilled = 0;
   s->fp = NULL;
@@ -34,23 +34,6 @@ void j2t_store_init(j2t_store *s, size_t threshold,
   s->total = 0;
   s->get_temp_filename = get_temp_filename;
   s->err = JSON2TOON_OK;
-}
-
-static int ram_reserve(j2t_store *s, size_t need) {
-  if (need <= s->ram_cap)
-    return 0;
-  {
-    size_t nc = s->ram_cap ? s->ram_cap : 256;
-    char *nb;
-    while (nc < need)
-      nc *= 2;
-    nb = (char *)realloc(s->ram, nc);
-    if (!nb)
-      return -1;
-    s->ram = nb;
-    s->ram_cap = nc;
-  }
-  return 0;
 }
 
 /* Move to spilled mode: obtain the temp file and flush the resident bytes into
@@ -70,12 +53,12 @@ static int spill_open(j2t_store *s) {
     s->err = JSON2TOON_ERR_IO;
     return -1;
   }
-  if (s->ram_len && fwrite(s->ram, 1, s->ram_len, s->fp) != s->ram_len) {
+  if (s->ram.len && fwrite(s->ram.p, 1, s->ram.len, s->fp) != s->ram.len) {
     s->err = JSON2TOON_ERR_IO;
     return -1;
   }
   s->spilled = 1;
-  s->ram_len = 0;
+  s->ram.len = 0;
   return 0;
 }
 
@@ -85,7 +68,7 @@ int j2t_store_append(j2t_store *s, const char *p, size_t n) {
   if (n == 0)
     return JSON2TOON_OK;
 
-  if (!s->spilled && s->ram_len + n > s->threshold) {
+  if (!s->spilled && s->ram.len + n > s->threshold) {
     if (spill_open(s) != 0)
       return s->err;
   }
@@ -96,12 +79,10 @@ int j2t_store_append(j2t_store *s, const char *p, size_t n) {
       return s->err;
     }
   } else {
-    if (ram_reserve(s, s->ram_len + n) != 0) {
+    if (j2t_buf_append(&s->ram, p, n) != 0) {
       s->err = JSON2TOON_ERR_MEMORY;
       return s->err;
     }
-    memcpy(s->ram + s->ram_len, p, n);
-    s->ram_len += n;
   }
   s->total += n;
   return JSON2TOON_OK;
@@ -120,16 +101,14 @@ void j2t_store_reset(j2t_store *s) {
     s->tmpname = NULL;
   }
   s->spilled = 0;
-  s->ram_len = 0;
+  s->ram.len = 0;
   s->total = 0;
   s->err = JSON2TOON_OK;
 }
 
 void j2t_store_free(j2t_store *s) {
   j2t_store_reset(s);
-  free(s->ram);
-  s->ram = NULL;
-  s->ram_cap = 0;
+  j2t_buf_free(&s->ram);
 }
 
 /* ------------------------------------------------------------------ reader */
@@ -174,7 +153,7 @@ int j2t_reader_getc(j2t_reader *r) {
   if (r->pos >= s->total)
     return -1;
   if (!s->spilled) {
-    c = (unsigned char)s->ram[r->pos];
+    c = (unsigned char)s->ram.p[r->pos];
   } else {
     if (reader_fill(r) != 0)
       return -1;
@@ -189,7 +168,7 @@ int j2t_reader_peek(j2t_reader *r) {
   if (r->pos >= s->total)
     return -1;
   if (!s->spilled)
-    return (unsigned char)s->ram[r->pos];
+    return (unsigned char)s->ram.p[r->pos];
   if (reader_fill(r) != 0)
     return -1;
   return (unsigned char)r->buf[r->pos - r->buf_off];
@@ -204,7 +183,7 @@ size_t j2t_reader_read(j2t_reader *r, char *dst, size_t n) {
   if ((uint64_t)n > avail)
     n = (size_t)avail;
   if (!s->spilled) {
-    memcpy(dst, s->ram + r->pos, n);
+    memcpy(dst, s->ram.p + r->pos, n);
     r->pos += n;
     return n;
   }

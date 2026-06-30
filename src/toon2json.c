@@ -13,6 +13,7 @@
  * shared with the forward path; everything specific to parsing TOON lives here.
  */
 #include "internal.h"
+#include "unicode.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -51,13 +52,11 @@ struct toon2json {
   size_t err_offset;
 
   /* current line accumulator (without its terminating newline) */
-  char *line;
-  size_t linelen, linecap;
+  j2t_buf line;
   size_t line_off;         /* stream offset of the first byte of `line` */
 
   /* scratch buffer for decoded string/key bytes */
-  char *scratch;
-  size_t scratchlen, scratchcap;
+  j2t_buf scratch;
 
   frame *frames;
   size_t nframes, framecap;
@@ -66,23 +65,6 @@ struct toon2json {
 typedef struct toon2json toon2json;
 
 /* --------------------------------------------------------------- utilities */
-
-static int buf_reserve(char **buf, size_t *cap, size_t need) {
-  if (need <= *cap)
-    return 0;
-  {
-    size_t nc = *cap ? *cap : 64;
-    char *nb;
-    while (nc < need)
-      nc *= 2;
-    nb = (char *)realloc(*buf, nc);
-    if (!nb)
-      return -1;
-    *buf = nb;
-    *cap = nc;
-  }
-  return 0;
-}
 
 static void set_err(toon2json *t, int code, size_t off) {
   if (t->err == JSON2TOON_OK) {
@@ -118,62 +100,20 @@ static const char *skip_quoted(const char *p, const char *end) {
 
 /* ------------------------------------------------------------- decode quoted */
 
-static int utf8_encode(unsigned cp, char out[4]) {
-  if (cp <= 0x7f) {
-    out[0] = (char)cp;
-    return 1;
-  } else if (cp <= 0x7ff) {
-    out[0] = (char)(0xc0 | (cp >> 6));
-    out[1] = (char)(0x80 | (cp & 0x3f));
-    return 2;
-  } else if (cp <= 0xffff) {
-    out[0] = (char)(0xe0 | (cp >> 12));
-    out[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
-    out[2] = (char)(0x80 | (cp & 0x3f));
-    return 3;
-  } else {
-    out[0] = (char)(0xf0 | (cp >> 18));
-    out[1] = (char)(0x80 | ((cp >> 12) & 0x3f));
-    out[2] = (char)(0x80 | ((cp >> 6) & 0x3f));
-    out[3] = (char)(0x80 | (cp & 0x3f));
-    return 4;
-  }
-}
-
+/* Parse 4 hex digits at [s,s+4) but only if [s,end) has room; -1 otherwise.
+ * (j2t_hex4 itself assumes 4 readable bytes.) */
 static int hex4(const char *s, const char *end, unsigned *out) {
-  unsigned v = 0;
-  int i;
   if (s + 4 > end)
     return -1;
-  for (i = 0; i < 4; i++) {
-    char c = s[i];
-    v <<= 4;
-    if (c >= '0' && c <= '9')
-      v |= (unsigned)(c - '0');
-    else if (c >= 'a' && c <= 'f')
-      v |= (unsigned)(c - 'a' + 10);
-    else if (c >= 'A' && c <= 'F')
-      v |= (unsigned)(c - 'A' + 10);
-    else
-      return -1;
-  }
-  *out = v;
-  return 0;
+  return j2t_hex4(s, out);
 }
 
 static int scratch_putc(toon2json *t, char c) {
-  if (buf_reserve(&t->scratch, &t->scratchcap, t->scratchlen + 1) != 0)
-    return -1;
-  t->scratch[t->scratchlen++] = c;
-  return 0;
+  return j2t_buf_putc(&t->scratch, c);
 }
 
 static int scratch_put(toon2json *t, const char *p, size_t n) {
-  if (buf_reserve(&t->scratch, &t->scratchcap, t->scratchlen + n) != 0)
-    return -1;
-  memcpy(t->scratch + t->scratchlen, p, n);
-  t->scratchlen += n;
-  return 0;
+  return j2t_buf_append(&t->scratch, p, n);
 }
 
 /* Decode a TOON-quoted token [s,e) (including surrounding quotes) into
@@ -181,7 +121,7 @@ static int scratch_put(toon2json *t, const char *p, size_t n) {
 static int decode_quoted(toon2json *t, const char *s, const char *e) {
   const char *p = s + 1;                 /* after opening quote */
   const char *q = e - 1;                 /* the closing quote */
-  t->scratchlen = 0;
+  t->scratch.len = 0;
   while (p < q) {
     unsigned char c = (unsigned char)*p;
     if (c == '\\') {
@@ -215,7 +155,7 @@ static int decode_quoted(toon2json *t, const char *s, const char *e) {
           } else if (cp >= 0xdc00 && cp <= 0xdfff) {
             return -1;                   /* lone low surrogate */
           }
-          el = utf8_encode(cp, enc);
+          el = j2t_utf8_encode(cp, enc);
           if (scratch_put(t, enc, (size_t)el) != 0)
             return -2;
           continue;
@@ -250,7 +190,7 @@ static int emit_key(toon2json *t, const char *s, const char *e) {
     int rc = decode_quoted(t, s, e);
     if (rc == -2) { set_err(t, JSON2TOON_ERR_MEMORY, t->line_off); return -1; }
     if (rc != 0) { set_err(t, JSON2TOON_ERR_PARSE, t->line_off); return -1; }
-    emit_json_string(t, t->scratch, t->scratchlen);
+    emit_json_string(t, t->scratch.p, t->scratch.len);
   } else {
     emit_json_string(t, s, (size_t)(e - s));
   }
@@ -276,7 +216,7 @@ static int emit_scalar(toon2json *t, const char *s, size_t n) {
     rc = decode_quoted(t, s, s + n);
     if (rc == -2) { set_err(t, JSON2TOON_ERR_MEMORY, t->line_off); return -1; }
     if (rc != 0) { set_err(t, JSON2TOON_ERR_PARSE, t->line_off); return -1; }
-    emit_json_string(t, t->scratch, t->scratchlen);
+    emit_json_string(t, t->scratch.p, t->scratch.len);
     return 0;
   }
   if (n == 0) {                          /* empty bare token -> empty string */
@@ -410,11 +350,11 @@ static char *dup_token(toon2json *t, const char *ks, const char *ke,
     if (rc == -2)
       return NULL;                       /* OOM */
     if (rc != 0) { *bad = 1; return NULL; }
-    r = (char *)malloc(t->scratchlen ? t->scratchlen : 1);
+    r = (char *)malloc(t->scratch.len ? t->scratch.len : 1);
     if (!r)
       return NULL;
-    memcpy(r, t->scratch, t->scratchlen);
-    *outlen = t->scratchlen;
+    memcpy(r, t->scratch.p, t->scratch.len);
+    *outlen = t->scratch.len;
   } else {
     size_t n = (size_t)(ke - ks);
     r = (char *)malloc(n ? n : 1);
@@ -767,8 +707,8 @@ static void reconcile(toon2json *t, unsigned indent) {
 }
 
 static void process_line(toon2json *t) {
-  const char *content = t->line;
-  size_t clen = t->linelen;
+  const char *content = t->line.p;
+  size_t clen = t->line.len;
   unsigned indent = 0;
   int is_item = 0;
   const char *val;
@@ -897,7 +837,7 @@ int toon2json_feed(toon2json *t, const char *data, size_t len) {
     char c = data[i];
     if (c == '\n') {
       process_line(t);
-      t->linelen = 0;
+      t->line.len = 0;
       t->stream_pos++;
       t->line_off = t->stream_pos;
       if (t->err != JSON2TOON_OK)
@@ -908,15 +848,14 @@ int toon2json_feed(toon2json *t, const char *data, size_t len) {
       }
       continue;
     }
-    if (t->opt.max_line_bytes && t->linelen + 1 > t->opt.max_line_bytes) {
+    if (t->opt.max_line_bytes && t->line.len + 1 > t->opt.max_line_bytes) {
       set_err(t, JSON2TOON_ERR_LIMIT, t->stream_pos);
       return t->err;
     }
-    if (buf_reserve(&t->line, &t->linecap, t->linelen + 1) != 0) {
+    if (j2t_buf_putc(&t->line, c) != 0) {
       set_err(t, JSON2TOON_ERR_MEMORY, t->stream_pos);
       return t->err;
     }
-    t->line[t->linelen++] = c;
     t->stream_pos++;
   }
   return JSON2TOON_OK;
@@ -929,9 +868,9 @@ int toon2json_finish(toon2json *t) {
     return t->err;
 
   /* process any final line not terminated by a newline */
-  if (t->linelen > 0) {
+  if (t->line.len > 0) {
     process_line(t);
-    t->linelen = 0;
+    t->line.len = 0;
     if (t->err != JSON2TOON_OK)
       return t->err;
   }
@@ -996,8 +935,8 @@ void toon2json_delete(toon2json *t) {
   for (i = 0; i < t->nframes; i++)
     frame_free_cols(&t->frames[i]);
   free(t->frames);
-  free(t->line);
-  free(t->scratch);
+  j2t_buf_free(&t->line);
+  j2t_buf_free(&t->scratch);
   free(t);
 }
 
