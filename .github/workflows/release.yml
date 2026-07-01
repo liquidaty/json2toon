@@ -1,0 +1,228 @@
+name: release
+
+# Build distributable binary archives (CLI + library + header) for the same
+# platforms zsv targets, and, on a version tag, attach them to the GitHub
+# Release. This is the release/packaging complement to ci.yml (which builds and
+# tests but deliberately omits packaging). Modeled on liquidaty/zsv's CI.
+#
+# Platforms (archive label -> what it is):
+#   amd64-linux-gcc      glibc x86-64 Linux, dynamic
+#   amd64-linux-musl     musl x86-64 Linux, fully static (runs anywhere)
+#   amd64-macosx-clang   x86-64 macOS
+#   arm64-macosx-clang   Apple-silicon macOS
+#   amd64-freebsd-gcc    x86-64 FreeBSD
+#   amd64-windows-mingw  x86-64 Windows (mingw-w64 cross-compile)
+#
+# Each job stages `make install` output and produces <name>.tar.gz + <name>.zip
+# via scripts/ci-package.sh, uploads them as workflow artifacts, and the final
+# publish job attaches them to the Release (tags only).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Don't cancel an in-progress release upload; let each run finish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  ARTIFACT_DIR: .artifacts
+  ARTIFACT_RETENTION_DAYS: 5
+
+jobs:
+  # Resolve the version once so every archive is named consistently: the tag
+  # (minus a leading 'v') on a tag build, else the header version for manual runs.
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      VERSION: ${{ steps.v.outputs.VERSION }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version
+        id: v
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="$(make print-version)"
+          fi
+          echo "VERSION=$VERSION" >>"$GITHUB_OUTPUT"
+          echo "Resolved VERSION=$VERSION"
+
+  # ------------------------------------------------- native (Linux + macOS)
+  # Three targets that share identical steps: build natively, package, upload.
+  package:
+    needs: version
+    name: package (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: amd64-linux-gcc
+            cc: gcc
+          - os: macos-13
+            platform: amd64-macosx-clang
+            cc: clang
+          - os: macos-latest
+            platform: arm64-macosx-clang
+            cc: clang
+    env:
+      VERSION: ${{ needs.version.outputs.VERSION }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: CC=${{ matrix.cc }} ./configure
+      - name: Build and package
+        run: ./scripts/ci-package.sh
+      - name: Upload archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: json2toon-${{ env.VERSION }}-${{ matrix.platform }}
+          path: ${{ env.ARTIFACT_DIR }}/json2toon-${{ env.VERSION }}-${{ matrix.platform }}.*
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: error
+
+  # ----------------------------------------------- Windows (mingw cross)
+  windows-mingw:
+    needs: version
+    name: package (amd64-windows-mingw)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.version.outputs.VERSION }}
+      PLATFORM: amd64-windows-mingw
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw-w64 + zip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 zip
+      - name: Configure (cross to Windows)
+        env:
+          CC: x86_64-w64-mingw32-gcc
+          AR: x86_64-w64-mingw32-ar
+          RANLIB: x86_64-w64-mingw32-ranlib
+          CONFIGURE_HOST: x86_64-w64-mingw32
+        run: ./configure
+      - name: Build and package
+        run: ./scripts/ci-package.sh
+      - name: Upload archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: json2toon-${{ env.VERSION }}-amd64-windows-mingw
+          path: ${{ env.ARTIFACT_DIR }}/json2toon-${{ env.VERSION }}-amd64-windows-mingw.*
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: error
+
+  # --------------------------------------------------------------- musl
+  # Fully static build under musl libc on Alpine.
+  musl:
+    needs: version
+    name: package (amd64-linux-musl)
+    runs-on: ubuntu-latest
+    container: alpine:3.20
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.version.outputs.VERSION }}
+      PLATFORM: amd64-linux-musl
+    steps:
+      # Alpine ships busybox 'sh' but not bash; install it (the default shell is
+      # bash) along with the toolchain and archivers.
+      - name: Install toolchain
+        shell: sh
+        run: apk add --no-cache build-base make bash git zip tar
+      - uses: actions/checkout@v4
+      - name: Configure (static)
+        env:
+          STATIC_BUILD: '1'
+        run: ./configure
+      - name: Build and package
+        run: ./scripts/ci-package.sh
+      - name: Upload archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: json2toon-${{ env.VERSION }}-amd64-linux-musl
+          path: ${{ env.ARTIFACT_DIR }}/json2toon-${{ env.VERSION }}-amd64-linux-musl.*
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: error
+
+  # ------------------------------------------------------------- FreeBSD
+  # Native x86-64 FreeBSD build inside a VM (the host is Linux).
+  freebsd:
+    needs: version
+    name: package (amd64-freebsd-gcc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.version.outputs.VERSION }}
+      PLATFORM: amd64-freebsd-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and package in FreeBSD VM
+        uses: cross-platform-actions/action@v0.27.0
+        with:
+          operating_system: freebsd
+          version: '13.2'
+          environment_variables: VERSION PLATFORM ARTIFACT_DIR
+          shell: sh
+          run: |
+            sudo pkg install -y gcc13 gmake zip
+            CC=gcc13 ./configure
+            MAKE=gmake ./scripts/ci-package.sh
+      - name: Upload archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: json2toon-${{ env.VERSION }}-amd64-freebsd-gcc
+          path: ${{ env.ARTIFACT_DIR }}/json2toon-${{ env.VERSION }}-amd64-freebsd-gcc.*
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          if-no-files-found: error
+
+  # ------------------------------------------------------------- publish
+  # Tag builds only: gather every archive, attest build provenance, and
+  # create/update the GitHub Release with the archives attached.
+  publish:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs: [version, package, windows-mingw, musl, freebsd]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write        # create the release and upload assets
+      id-token: write        # provenance attestation
+      attestations: write
+    env:
+      VERSION: ${{ needs.version.outputs.VERSION }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ env.ARTIFACT_DIR }}
+          merge-multiple: true
+      - name: List collected archives
+        run: ls -hl "$ARTIFACT_DIR"
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: ${{ env.ARTIFACT_DIR }}/*
+      - name: Create or update the Release and upload archives
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+                 --title "$tag" --generate-notes
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
+            "$ARTIFACT_DIR"/json2toon-*

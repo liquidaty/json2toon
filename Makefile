@@ -255,7 +255,7 @@ endif
 
 .PHONY: help all build lib app test check test-leaks fuzz fuzz-standalone \
         strict install install-lib install-app uninstall uninstall-lib uninstall-app \
-        clean distclean print-builddir
+        clean distclean print-builddir print-version
 .DEFAULT_GOAL := help
 
 help:
@@ -465,6 +465,11 @@ uninstall-app:
 
 print-builddir:
 	@echo $(BUILDDIR)
+
+# The library/CLI version (single source of truth: include/json2toon.h). Used by
+# the release workflow to name distributable archives.
+print-version:
+	@echo $(VERSION)
 
 clean:
 	rm -rf $(BUILDROOT)
