@@ -1,0 +1,5 @@
+name: Alice
+age: 30
+nested:
+  a: 1
+  b: true

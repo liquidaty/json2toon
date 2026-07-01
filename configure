@@ -1,0 +1,165 @@
+#!/bin/sh
+# json2toon configure - a small handwritten configure script. It probes the
+# toolchain and writes a make include file (default: config.mk; overridable via
+# the CONFIGFILE environment variable, as the cross-build environments do).
+#
+# It deliberately performs no compile-and-RUN probes, so it works unchanged when
+# cross-compiling (CROSS_COMPILING=yes), where target binaries cannot run on the
+# build host; this script only needs to pick shared-library conventions for the
+# target OS.
+
+set -e
+
+# Typical values may be supplied either as a direct option (e.g. --prefix=DIR)
+# or via the environment (e.g. PREFIX=DIR). This lets the cross-build "*_env"
+# wrappers -- which export PREFIX, CC, AR, RANLIB, CONFIGURE_HOST, CONFIGFILE,
+# STATIC_BUILD, ... -- configure correctly when run as `./<arch>_env ./configure`
+# with no extra arguments. An explicit option always overrides the environment.
+prefix="${PREFIX:-/usr/local}"
+enable_debug=0
+enable_shared=1
+# YAJL (the forward path's array validator). Default: the subset vendored under
+# third_party/yajl. --with-yajl=DIR links an external yajl, erroring if its header
+# is absent there (header check only -- no run-probe, so cross-safe).
+with_yajl="${WITH_YAJL:-}"
+# Target triple. Precedence: --host=TRIPLE (below) > $HOST > the cross env's
+# $CONFIGURE_HOST > empty (empty means "target the build host", via uname).
+host="${HOST:-${CONFIGURE_HOST:-}}"
+
+for arg in "$@"; do
+  case "$arg" in
+    --prefix=*)      prefix="${arg#*=}" ;;
+    --host=*)        host="${arg#*=}" ;;
+    --enable-debug)  enable_debug=1 ;;
+    --disable-shared) enable_shared=0 ;;
+    --enable-shared) enable_shared=1 ;;
+    --with-yajl=*)   with_yajl="${arg#*=}" ;;
+    -h|--help)
+      cat <<EOF
+Usage: ./configure [OPTIONS]
+  --prefix=DIR        installation root [\$PREFIX or /usr/local]
+  --host=TRIPLE       target triple when cross-compiling [\$HOST or
+                      \$CONFIGURE_HOST]
+  --enable-debug      build with debug info and assertions
+  --disable-shared    build the static library only
+  --with-yajl=DIR     link an external yajl from DIR (expects
+                      DIR/include/yajl/yajl_parse.h and DIR/lib) instead of the
+                      vendored copy; errors if the header is absent [\$WITH_YAJL]
+Environment: CC, AR, RANLIB, CFLAGS, LDFLAGS, CONFIGFILE are honoured.
+  PREFIX provides the default for --prefix; HOST or CONFIGURE_HOST provides
+  the default for --host; STATIC_BUILD=1 forces a static-only build. These
+  let the cross-build "*_env" wrappers work via \`./<arch>_env ./configure\`.
+EOF
+      exit 0 ;;
+    *) echo "configure: ignoring unknown option: $arg" >&2 ;;
+  esac
+done
+
+CC="${CC:-cc}"
+AR="${AR:-ar}"
+RANLIB="${RANLIB:-ranlib}"
+CONFIGFILE="${CONFIGFILE:-config.mk}"
+
+# Determine the target OS for shared-library conventions. Prefer the explicit
+# host triple (cross builds); otherwise fall back to the build host's uname.
+target_os=""
+case "$host" in
+  *darwin*|*apple*) target_os=darwin ;;
+  *linux*)          target_os=linux ;;
+  *mingw*|*windows*) target_os=windows ;;
+  "")               target_os="$(uname -s 2>/dev/null || echo unknown)" ;;
+  *)                target_os=other ;;
+esac
+case "$target_os" in
+  Darwin) target_os=darwin ;;
+  Linux)  target_os=linux ;;
+esac
+
+# Executable suffix: Windows/mingw toolchains append ".exe" to the linker
+# output, so the build and install rules must expect that name there (and only
+# there). Emitted to the config file as EXE_EXT.
+EXE_EXT=""
+
+# Library version, read once from the public header (single source of truth).
+# soversion (the major component) is the soname / install_name ABI tag.
+version=$(sed -n 's/.*JSON2TOON_VERSION "\([^"]*\)".*/\1/p' include/json2toon.h | head -1)
+version="${version:-0.0.0}"
+soversion="${version%%.*}"
+
+case "$target_os" in
+  darwin)
+    SHLIB_EXT=dylib
+    SHLIB_LDFLAGS="-dynamiclib -install_name $prefix/lib/libjson2toon.$soversion.dylib -compatibility_version $soversion -current_version $version" ;;
+  windows)
+    SHLIB_EXT=dll
+    SHLIB_LDFLAGS="-shared"
+    EXE_EXT=".exe" ;;
+  *)
+    SHLIB_EXT=so
+    SHLIB_LDFLAGS="-shared -Wl,-soname,libjson2toon.so.$soversion" ;;
+esac
+
+EXTRA_CFLAGS=""
+
+# In cross/static environments shared libraries are usually undesirable.
+if [ -n "${STATIC_BUILD}" ] && [ "${STATIC_BUILD}" != "0" ]; then
+  enable_shared=0
+fi
+
+DEBUG_DEFAULT=0
+[ "$enable_debug" = "1" ] && DEBUG_DEFAULT=1
+
+# YAJL: vendored by default; --with-yajl=DIR selects an external install and
+# fails fast if the expected header is missing there (file existence only -- no
+# compile/run probe, so it stays correct when cross-compiling).
+if [ -n "$with_yajl" ]; then
+  if [ ! -f "$with_yajl/include/yajl/yajl_parse.h" ]; then
+    echo "configure: error: --with-yajl=$with_yajl: yajl not found there" >&2
+    echo "  (expected $with_yajl/include/yajl/yajl_parse.h)" >&2
+    exit 1
+  fi
+  YAJL_VENDORED=0
+  YAJL_CFLAGS="-I$with_yajl/include"
+  YAJL_LIBS="-L$with_yajl/lib -lyajl"
+  YAJL_DESC="external ($with_yajl)"
+else
+  YAJL_VENDORED=1
+  YAJL_CFLAGS="-Ithird_party/yajl"
+  YAJL_LIBS=""
+  YAJL_DESC="vendored (third_party/yajl)"
+fi
+
+cat > "$CONFIGFILE" <<EOF
+# Generated by ./configure -- do not edit.
+CC = $CC
+AR = $AR
+RANLIB = $RANLIB
+PREFIX = $prefix
+EXTRA_CFLAGS = $EXTRA_CFLAGS
+EXTRA_LDFLAGS =
+SHLIB_EXT = $SHLIB_EXT
+SHLIB_LDFLAGS = $SHLIB_LDFLAGS
+EXE_EXT = $EXE_EXT
+ENABLE_SHARED = $enable_shared
+DEBUG_DEFAULT = $DEBUG_DEFAULT
+YAJL_VENDORED = $YAJL_VENDORED
+YAJL_CFLAGS = $YAJL_CFLAGS
+YAJL_LIBS = $YAJL_LIBS
+EOF
+
+# pkg-config file. Uses $version (read above) so it never drifts from
+# JSON2TOON_VERSION / json2toon_version() (single source of truth).
+if [ -f json2toon.pc.in ]; then
+  sed -e "s#@PREFIX@#$prefix#g" \
+      -e "s#@VERSION@#$version#g" \
+      -e "s#@YAJL_LIBS@#$YAJL_LIBS#g" json2toon.pc.in > json2toon.pc
+fi
+
+echo "configure: writing $CONFIGFILE"
+echo "  CC            = $CC"
+echo "  prefix        = $prefix"
+echo "  host triple   = ${host:-(build host)}"
+echo "  target os     = $target_os"
+echo "  exe suffix    = ${EXE_EXT:-(none)}"
+echo "  shared lib    = $enable_shared ($SHLIB_EXT)"
+echo "  yajl          = $YAJL_DESC"

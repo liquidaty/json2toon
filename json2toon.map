@@ -1,0 +1,10 @@
+/* ELF linker version script: export only the public API from the shared
+ * object, keeping the statically vendored yajl symbols local so they never
+ * pollute the ABI or clash with a consumer that also links libyajl. */
+{
+  global:
+    json2toon_*;
+    toon2json_*;
+  local:
+    *;
+};

@@ -1,0 +1,4 @@
+users[2]{id,name}:
+  1,Ann
+  2,Bob
+tags[3]: a,b,c

@@ -1,0 +1,238 @@
+name: ci
+
+# Build and test json2toon on every pull request and on pushes to main, across
+# the toolchains/targets the project commits to supporting (see README's
+# "Portability" section): clang and gcc on Linux and macOS (x86-64 and ARM64),
+# mingw64 cross-compiled to Windows, musl/static on Alpine, and emscripten to
+# WebAssembly. Modeled on liquidaty/zsv's CI, minus the release/packaging jobs.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+  workflow_dispatch:
+    inputs:
+      macos_intel:
+        description: 'Also run the Intel (x86_64) macOS job'
+        required: false
+        type: boolean
+        default: false
+
+# Only the latest run for a given branch/PR needs to finish; cancel the rest.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # --------------------------------------------------------------- Linux
+  linux:
+    name: linux (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: CC=${{ matrix.cc }} ./configure
+      - name: Build (library + CLI)
+        run: make build
+      - name: Test
+        run: make test
+
+  # AddressSanitizer + UndefinedBehaviorSanitizer (LeakSanitizer included).
+  sanitizers:
+    name: linux (asan+ubsan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: ./configure
+      - name: Test under sanitizers
+        run: make ASAN=1 test
+
+  # Scalar build: exercises the portable fallback with SIMD compiled out.
+  scalar:
+    name: linux (scalar, --disable-simd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (scalar only)
+        run: ./configure --disable-simd
+      - name: Build (library + CLI)
+        run: make build
+      - name: Test
+        run: make test
+
+  # Strict-warnings lane: compile the library TUs under an explicit standard
+  # with -Werror -Wconversion -Wshadow -Wstrict-prototypes -Wvla, on both
+  # compilers. Catches implicit narrowing / shadowing the default build tolerates.
+  strict:
+    name: linux (strict-warnings)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: ./configure
+      - name: Strict compile (gcc)
+        run: make strict CC=gcc
+      - name: Strict compile (clang)
+        run: make strict CC=clang
+
+  # --------------------------------------------------------------- macOS
+  # Apple-silicon (arm64) runs on every push/PR; it's plentiful and fast.
+  macos:
+    name: macos (arm64)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: ./configure
+      - name: Build (library + CLI)
+        run: make build
+      - name: Test
+        run: make test
+
+  # Intel (x86_64) macOS is opt-in only: the macos-13 runner pool is scarce and
+  # being deprecated, so it can queue for minutes. The x86 SIMD paths are also
+  # covered by the Linux gcc/clang jobs. Run it on demand via "Run workflow"
+  # with the "macos_intel" box checked.
+  macos-intel:
+    name: macos (x86_64, manual)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.macos_intel }}
+    runs-on: macos-13
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: ./configure
+      - name: Build (library + CLI)
+        run: make build
+      - name: Test
+        run: make test
+
+  # ----------------------------------------------- Windows (mingw cross)
+  # Cross-compile from Linux with mingw-w64. The produced binaries are PE/COFF
+  # and cannot run on the Linux host, so this job builds and verifies the
+  # artifacts rather than running the suite (matching zsv's mingw job).
+  windows-mingw:
+    name: windows (mingw64 cross-compile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+      - name: Configure (cross to Windows)
+        env:
+          CC: x86_64-w64-mingw32-gcc
+          AR: x86_64-w64-mingw32-ar
+          RANLIB: x86_64-w64-mingw32-ranlib
+          CONFIGURE_HOST: x86_64-w64-mingw32
+        run: ./configure
+      - name: Build (library + CLI)
+        run: make build
+      - name: Verify Windows artifacts
+        run: |
+          builddir=$(make print-builddir)
+          app="$builddir/json2toon.exe"
+          dll="$builddir/libjson2toon.dll"
+          file "$app" "$dll"
+          file "$app" | grep -q 'PE32+ executable'
+          file "$dll" | grep -q 'PE32+ executable (DLL)'
+
+  # --------------------------------------------------------------- musl
+  # Static build under musl libc on Alpine.
+  musl:
+    name: linux (musl, static)
+    runs-on: ubuntu-latest
+    container: alpine:3.20
+    timeout-minutes: 10
+    steps:
+      # Alpine ships busybox 'sh' but not bash; the workflow-level default shell
+      # is bash, so this first step must explicitly use sh to install it.
+      - name: Install toolchain
+        shell: sh
+        run: apk add --no-cache build-base make bash git
+      - uses: actions/checkout@v4
+      - name: Configure (static)
+        env:
+          STATIC_BUILD: '1'
+        run: ./configure
+      - name: Build (library + CLI)
+        run: make build
+      - name: Test
+        run: make test
+
+  # ----------------------------------------------------- WebAssembly
+  # Cross-compile to WASM with emscripten and run the test suite under Node.
+  # The Makefile's `test` target execs the test binary directly, which a WASM
+  # artifact can't do, so build the binary and invoke it via node.
+  wasm:
+    name: wasm (emscripten)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up emsdk
+        uses: mymindstorm/setup-emsdk@v14
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+      - name: Configure (emscripten, static)
+        env:
+          STATIC_BUILD: '1'
+          CROSS_COMPILING: 'yes'
+        run: emconfigure ./configure --disable-shared
+      - name: Build and run test binary under Node
+        run: |
+          # The test target lands in the per-target build dir, not obj/. Resolve
+          # that dir under the same emmake environment used to build it (so the
+          # emcc-derived build id matches), build it, then run the emitted JS
+          # launcher with Node.
+          testbin="$(emmake make print-builddir | tail -1)/test"
+          emmake make "$testbin"
+          node "$testbin"
+
+  # ----------------------------------------------------------- fuzzing
+  # Short libFuzzer session driving BOTH converter directions (clang +
+  # libFuzzer), plus a build of the portable standalone replay driver. The
+  # macOS build host can't fuzz (Apple clang lacks libFuzzer), so this is the
+  # canonical fuzz coverage.
+  fuzz:
+    name: linux (fuzz, clang+libFuzzer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: CC=clang ./configure
+      - name: Build the portable replay driver
+        run: make fuzz-standalone
+      - name: Build the libFuzzer target
+        run: make fuzz FUZZ_CC=clang
+      - name: Fuzz both directions
+        run: |
+          bin="$(make print-builddir | tail -1)/fuzz"
+          "$bin" -max_total_time=60 -print_final_stats=1 tests/corpus

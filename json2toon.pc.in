@@ -1,0 +1,11 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: json2toon
+Description: Streaming JSON to TOON (Token-Oriented Object Notation) converter
+Version: @VERSION@
+Libs: -L${libdir} -ljson2toon
+Libs.private: @YAJL_LIBS@
+Cflags: -I${includedir}
